@@ -443,6 +443,13 @@ struct FireParams
     // its own independent copy of the Albini form regardless of this option.
     std::string       reaction_velocity_formula = "albini";
 
+    // Overrides every fuel model's heat_content [BTU/lb] uniformly when > 0
+    // (default -1 = disabled, use each fuel model's own table value). Meant
+    // for matching a specific WRF-Fire run's namelist.fire cmbcnst [J/kg],
+    // which does not have to equal ERF's per-Anderson-model default of
+    // 8000 BTU/lb (18,608,979 J/kg at 1 BTU/lb = 2326 J/kg).
+    amrex::Real       heat_content_override_btu_lb = -1.0;
+
     // Phase 13B: Balbi (2009) physical fire spread model parameters.
     // Only used when ros_model = "balbi".
     // Defaults from Balbi (2009) Table 1.
@@ -1050,6 +1057,10 @@ struct FireParams
        one_of("ros_model", ros_model, {"rothermel", "behave", "balbi", "fbp", "hybrid", "prescribed", "cheney_gould", "macarthur"});
        pp.query("reaction_velocity_formula", reaction_velocity_formula);
        one_of("reaction_velocity_formula", reaction_velocity_formula, {"albini", "rothermel"});
+       pp.query("heat_content_btu_lb", heat_content_override_btu_lb);
+       if (heat_content_override_btu_lb > 0.0 && heat_content_override_btu_lb < 100.0) {
+           amrex::Abort("erf.fire.heat_content_btu_lb looks implausibly low (expected O(1e4), e.g. 8000 for the Anderson default) -- check units (BTU/lb, not J/kg)");
+       }
        pp.query("rothermel_per_fuel", rothermel_per_fuel);
 
        // Hybrid ROS

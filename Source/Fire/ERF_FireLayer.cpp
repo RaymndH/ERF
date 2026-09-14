@@ -219,6 +219,9 @@ void FireLayer::initialize(const ERF& erf,
 
     FuelModelParams fp = get_fuel_params(fire_params.fuel_model_id, fire_params.fuel_map.fuel_set_id(),
                                          fire_params.moisture_live);
+    if (fire_params.heat_content_override_btu_lb > 0.0) {
+        fp.heat_content = fire_params.heat_content_override_btu_lb;
+    }
     if (fire_params.fire_debug) {
         amrex::Print() << "[FIRE DEBUG] Uniform fuel model code=" << fire_params.fuel_model_id
                        << " set=" << fire_params.fuel_map.fuel_set << (fire_params.fuel_map.sb40_crosswalk ? " (crosswalk)" : "")

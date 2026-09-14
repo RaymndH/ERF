@@ -547,7 +547,13 @@ public:
     /// Parameters of the uniform fuel model, erf.fire.fuel_model_id, under the deck's fuel set.
     FuelModelParams uniform_fuel_params() const
     {
-        return get_fuel_params(m_params.fuel_model_id, m_params.fuel_map.fuel_set_id(), m_params.moisture_live);
+        FuelModelParams fp = get_fuel_params(m_params.fuel_model_id, m_params.fuel_map.fuel_set_id(), m_params.moisture_live);
+        // erf.fire.heat_content_btu_lb: uniform override for matching a
+        // specific WRF-Fire run's cmbcnst, see ERF_FireParams.H.
+        if (m_params.heat_content_override_btu_lb > 0.0) {
+            fp.heat_content = m_params.heat_content_override_btu_lb;
+        }
+        return fp;
     }
 
     /// The uniform fuel model's parameters for BEHAVE: the table without its curing transfer (behave_fuel_params).
