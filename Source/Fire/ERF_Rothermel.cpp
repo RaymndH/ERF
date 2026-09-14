@@ -9,7 +9,8 @@ RothermelComputed compute_rothermel_params(const FuelModelParams& fp,
                                            Real moisture_1hr,
                                            Real moisture_10hr,
                                            Real moisture_100hr,
-                                           bool use_wind_limit)
+                                           bool use_wind_limit,
+                                           bool use_rothermel_a_formula)
 {
     RothermelComputed rc;
 
@@ -56,7 +57,14 @@ RothermelComputed compute_rothermel_params(const FuelModelParams& fp,
     Real beta_op = 3.348 * std::pow(sigma, -0.8189);           // Eq. 37: optimum packing ratio
     Real sigma_1p5 = std::pow(sigma, 1.5);
     Real Gamma_max = sigma_1p5 / (495.0 + 0.0594 * sigma_1p5); // Eq. 36: maximum reaction velocity
-    Real A = 133.0 * std::pow(sigma, -0.7913);                 // Eq. 38: A coefficient
+    // A coefficient (Eq. 38): Albini's (1976) reformulation (ERF's original
+    // form) or WRF-Fire's original Rothermel (1972) form, selected by
+    // erf.fire.reaction_velocity_formula. The WRF form has a pole at
+    // sigma ~= 67 ft^-1 = (7.27/4.774)^10, below which A goes negative; the
+    // minimum SAV guard above keeps sigma >= 100 here, safely above it.
+    Real A = use_rothermel_a_formula
+        ? 1.0 / (4.774 * std::pow(sigma, 0.1) - 7.27)
+        : 133.0 * std::pow(sigma, -0.7913);
     Real beta_ratio = beta / beta_op;
     Real Gamma_prime = Gamma_max * std::pow(beta_ratio, A) * std::exp(A * (1.0 - beta_ratio)); // Eq. 38
 
@@ -165,7 +173,8 @@ std::vector<RothermelComputed> build_fuel_rothermel_table(
     Real moisture_100hr,
     int fuel_set,
     Real moisture_live,
-    bool use_wind_limit)
+    bool use_wind_limit,
+    bool use_rothermel_a_formula)
 {
     std::vector<RothermelComputed> table(ROTHERMEL_TABLE_SIZE);
 
@@ -176,7 +185,8 @@ std::vector<RothermelComputed> build_fuel_rothermel_table(
     // Slots 1-13 hold the Anderson models at their own codes; 14-53 the Scott-Burgan models.
     for (int slot = 1; slot < ROTHERMEL_TABLE_SIZE; ++slot) {
         table[slot] = compute_rothermel_params(get_fuel_params(fuel_code_from_slot(slot), (slot >= 14) ? 1 : fuel_set, moisture_live),
-                                              moisture_1hr, moisture_10hr, moisture_100hr, use_wind_limit);
+                                              moisture_1hr, moisture_10hr, moisture_100hr, use_wind_limit,
+                                              use_rothermel_a_formula);
     }
     return table;
 }
