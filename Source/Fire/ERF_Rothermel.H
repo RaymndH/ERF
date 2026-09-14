@@ -249,6 +249,15 @@ struct RothermelComputed
  *
  * @param[in] fp FuelModelParams for selected fuel model
  * @param[in] use_wind_limit  Apply the MEWS cap (erf.fire.use_wind_limit)
+ * @param[in] use_rothermel_a_formula  Select the reaction-velocity exponent A:
+ *                        false (default) Albini's (1976, GTR-INT-30) form,
+ *                        A = 133*sigma^-0.7913 (ERF's original behavior);
+ *                        true WRF-Fire's Rothermel (1972) original form,
+ *                        A = 1/(4.774*sigma^0.1-7.27)
+ *                        (erf.fire.reaction_velocity_formula = "rothermel").
+ *                        The WRF form has a pole at sigma ~= 67 ft^-1; this
+ *                        function's minimum-SAV guard (sigma >= 100) keeps
+ *                        every call safely above it.
  * @return RothermelComputed with precomputed coefficients
  *
  * Implements the full Rothermel model:
@@ -262,7 +271,8 @@ RothermelComputed compute_rothermel_params(const FuelModelParams& fp,
                                            amrex::Real moisture_1hr,
                                            amrex::Real moisture_10hr,
                                            amrex::Real moisture_100hr,
-                                           bool use_wind_limit = true);
+                                           bool use_wind_limit = true,
+                                           bool use_rothermel_a_formula = false);
 
 /**
  * @brief Compute rate-of-spread for a single fire cell (GPU kernel)
@@ -384,6 +394,9 @@ inline constexpr int ROTHERMEL_TABLE_SIZE = 54;   ///< FUEL_SLOT_COUNT: 0 non-bu
  * @param[in] moisture_10hr  10-hour dead fuel moisture [fraction]
  * @param[in] moisture_100hr 100-hour dead fuel moisture [fraction]
  * @param[in] use_wind_limit Apply the MEWS cap (erf.fire.use_wind_limit)
+ * @param[in] use_rothermel_a_formula Select the reaction-velocity A formula;
+ *                        see compute_rothermel_params()
+ *                        (erf.fire.reaction_velocity_formula = "rothermel")
  * @return host-side vector of size ROTHERMEL_TABLE_SIZE
  */
 std::vector<RothermelComputed> build_fuel_rothermel_table(
@@ -392,7 +405,8 @@ std::vector<RothermelComputed> build_fuel_rothermel_table(
     amrex::Real moisture_100hr,
     int fuel_set = 0,
     amrex::Real moisture_live = -1.0,
-    bool use_wind_limit = true);
+    bool use_wind_limit = true,
+    bool use_rothermel_a_formula = false);
 
 /**
  * @brief Compute the rate-of-spread field with per-cell Rothermel coefficients
