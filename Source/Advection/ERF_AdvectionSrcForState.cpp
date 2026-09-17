@@ -293,7 +293,13 @@ AdvectionSrcForScalars (const Box& bx,
 
     } // n
 
-    // Special advection operator for open BC (bndry tangent operations)
+    // Special advection operator for open BC (bndry tangent operations).
+    // Corner cells where an x-open and a y-open boundary meet would otherwise
+    // be written twice (once by each direction's tangential formula, the
+    // second silently overwriting the first) -- same bug as in
+    // ERF_AdvectionSrcForMom.cpp. By the same convention used there, let
+    // x-direction own the corner and shrink the y-direction boxes to exclude
+    // it, so every corner cell is written exactly once.
     if (xlo_open) {
         bool do_lo = true;
         AdvectionSrcForOpenBC_Tangent_Cons(bx_xlo, 0, icomp, ncomp, advectionSrc, cell_prim,
@@ -307,11 +313,19 @@ AdvectionSrcForScalars (const Box& bx,
     }
     if (ylo_open) {
         bool do_lo = true;
+        if (bx_ylo.ok()) {
+            if (xlo_open) { bx_ylo.growLo(0,-1); }
+            if (xhi_open) { bx_ylo.growHi(0,-1); }
+        }
         AdvectionSrcForOpenBC_Tangent_Cons(bx_ylo, 1, icomp, ncomp, advectionSrc, cell_prim,
                                            avg_xmom, avg_ymom, avg_zmom,
                                            detJ, cellSizeInv, do_lo);
     }
     if (yhi_open) {
+        if (bx_yhi.ok()) {
+            if (xlo_open) { bx_yhi.growLo(0,-1); }
+            if (xhi_open) { bx_yhi.growHi(0,-1); }
+        }
         AdvectionSrcForOpenBC_Tangent_Cons(bx_yhi, 1, icomp, ncomp, advectionSrc, cell_prim,
                                            avg_xmom, avg_ymom, avg_zmom,
                                            detJ, cellSizeInv);
