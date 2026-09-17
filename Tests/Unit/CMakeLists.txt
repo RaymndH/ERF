@@ -125,6 +125,10 @@ target_sources(${erf_exe_name}
     # Motivation: face-local wall metadata must not inherit a later wall's
     # density representation or treat explicit zero as absent.
     ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestWallBCMetadata.cpp
+    # Motivation: at a corner where two perpendicular Open BC faces meet,
+    # exactly one of them must own the tangential-advection box, or the
+    # corner cell is written twice (once from a ghost-cell-corrupted read).
+    ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestOpenBCCornerBox.cpp
     # Motivation: the chamber profile and perturbation must remain analytic,
     # bounded, and independent of MPI decomposition and tile shape.
     ${CMAKE_CURRENT_SOURCE_DIR}/Prob/ERF_GTestCloudChamber.cpp

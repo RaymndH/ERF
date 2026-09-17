@@ -275,6 +275,30 @@ AdvectionSrcForOpenBC_Tangent (const int& i,
                                const amrex::Real& dxInv,
                                const bool do_lo=false);
 
+/**
+ * At a corner where two perpendicular Open BC faces meet, exactly one of
+ * them must own the tangential-advection treatment of that corner's box --
+ * otherwise the corner cell is written twice: once by the boundary-normal
+ * open/radiative formula, once by the other direction's tangential
+ * advection stencil, whose flux reads one cell beyond the corner in its own
+ * "interior" direction (a ghost cell there), corrupting the result.
+ *
+ * This shrinks `b` by one cell in dimension `dim` at whichever of its two
+ * ends (`lo`/`hi`) is itself Open, so a corner box that would otherwise
+ * overlap the boundary-normal owner's box no longer does. Pure box
+ * geometry -- has no field data dependence, so it's unit-testable in
+ * isolation from the rest of the advection kernel.
+ */
+inline amrex::Box
+ShrinkTangentBoxForOpenBCCorner (amrex::Box b, int dim, bool lo_open, bool hi_open)
+{
+    if (b.ok()) {
+        if (lo_open) { b.growLo(dim, -1); }
+        if (hi_open) { b.growHi(dim, -1); }
+    }
+    return b;
+}
+
 /** Return the effective advection type used for the requested Runge-Kutta stage. */
 AMREX_GPU_HOST_DEVICE
 AMREX_FORCE_INLINE
