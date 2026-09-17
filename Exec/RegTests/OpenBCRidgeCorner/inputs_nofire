@@ -1,0 +1,64 @@
+# OpenBCRidgeCorner: just the wind and the ridge, fire mesh off.
+# Reproduces the atmosphere-only corner instability found via
+# FireRidgeLineAdvective34deg, with everything fire-specific (ignition,
+# fuel model, fire mesh) stripped out -- see README.md.
+geometry.prob_lo = 0.0 0.0 0.0
+geometry.prob_hi = 5200.0 5200.0 2000.0
+amr.n_cell       = 52 52 50
+geometry.is_periodic = 0 0 0
+
+# All four lateral faces Open (Klemp-Wilhelmson radiative BC) -- the
+# corner where xlo/ylo (inflow, for this wind) meets xhi/yhi (outflow)
+# is exactly where the bug this test targets shows up.
+xlo.type = "Open"
+xhi.type = "Open"
+ylo.type = "Open"
+yhi.type = "Open"
+
+amr.max_level = 0
+amr.max_grid_size   = 52
+amr.max_grid_size_z = 50
+
+erf.rayleigh_damp_W = true
+erf.rayleigh_dampcoef = 0.2
+erf.rayleigh_zdamp = 800.0
+
+erf.dycore_horiz_adv_type  = "Upwind_5th"
+erf.dryscal_horiz_adv_type = "Upwind_5th"
+
+zlo.type = "surface_layer"
+zhi.type = "SlipWall"
+erf.surface_layer.flux_type = "bulk_coeff"
+erf.most.Cd = 0.0
+erf.most.Ch = 0.0
+erf.most.Cq = 0.0
+erf.most.surf_temp = 300.0
+erf.most.surf_moist = 0.0
+
+erf.molec_diff_type = "None"
+erf.les_type = "Deardorff"
+erf.use_gravity = true
+erf.use_coriolis = false
+erf.theta_ref = 300.0
+
+erf.init_type = "input_sounding"
+erf.input_sounding_file = "input_sounding"
+erf.sounding_type = Ideal
+
+erf.terrain_type = StaticFittedMesh
+erf.terrain_file_name = "terrain_atm.txt"
+
+erf.fixed_dt = 0.25
+stop_time    = 300.0
+max_step     = 1200
+
+erf.sum_interval = -1
+erf.v = 0
+amr.v = 0
+erf.check_int = -1
+
+erf.plot_file_1 = plt3d_nofire
+erf.plot_int_1  = 40             # every 10 s at dt=0.25
+erf.plot_vars_1 = theta x_velocity y_velocity z_velocity z_phys
+
+erf.fire.enable = false
