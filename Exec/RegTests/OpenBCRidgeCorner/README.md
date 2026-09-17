@@ -152,19 +152,38 @@ advection order) in WRF-Fire instead. **Result: WRF stays stable where ERF
 does not** -- WRF's wind speed grows only 3 -> ~6 m/s over the same 300 s
 window where ERF's grows past 400 m/s. See `wrf_comparison/README.md` for
 the full settings-matching table, build/run instructions, and the wind
-extraction script. This points at an ERF-specific numerical robustness
-gap, not an inherent flaw in the "ridge crosses near/through an open
-boundary" domain design itself.
+extraction script.
+
+**Update, see `../OpenBCEllipsoidBuffer/`: this is NOT an inherent ERF
+numerical robustness gap.** The follow-up test there keeps everything
+about this setup identical except swapping the ridge (which crosses/runs
+near all four boundaries) for a finite ellipsoid kept >600 m clear of
+every boundary. With that one change, **ERF is completely stable too**
+(3 -> ~4.3 m/s, no growth) -- matching WRF closely. Terrain-to-boundary
+distance was the controlled variable and it flipped the outcome
+completely. The severe growth documented above was very likely driven by
+having terrain intersect/run close to an Open boundary specifically, not
+by a general fragility in ERF's Open BC on inflow faces regardless of
+geometry. Read `../OpenBCEllipsoidBuffer/README.md` before drawing any
+conclusion from this file alone.
 
 ## Still open
 
 The corner double-write bug is fixed and verified (this deck, and directly
-on the original `FireRidgeLineAdvective34deg` production case). What
-remains open, not fixed here or anywhere in this branch:
+on the original `FireRidgeLineAdvective34deg` production case) -- that
+part stands regardless of the finding above. What's now understood
+differently, and what remains genuinely open:
 
-- Why the instability isn't confined to the two mixed corners in this
-  deck, given the double-write bug itself is a corner-local mechanism.
-- Whether ERF's `"Open"` BC needs a different formulation on a genuine
-  inflow face (per `CLAUDE.md`: switching genuine upwind faces to Dirichlet
-  `"Inflow"` and keeping `"Open"` only on genuine downwind faces was
-  identified as "not yet tried").
+- **Understood, not open anymore**: the severe, domain-wide (not just
+  corner-localized) growth in this deck is explained by terrain crossing
+  close to the Open boundaries (see `../OpenBCEllipsoidBuffer/`), not by
+  an inherent ERF Open-BC weakness. Standard modeling practice already
+  avoids this domain layout for exactly this kind of reason.
+- **Still open**: whether ERF's `"Open"` BC could still be made more
+  robust for the (poor-practice, but sometimes unavoidable, e.g. a real
+  fire domain where terrain genuinely reaches the boundary) case where
+  terrain does approach an Open boundary -- e.g. per `CLAUDE.md`,
+  switching genuine upwind faces to Dirichlet `"Inflow"` and keeping
+  `"Open"` only on genuine downwind faces was identified as "not yet
+  tried." This is now a robustness/hardening question, not a correctness
+  bug blocking normal use.
