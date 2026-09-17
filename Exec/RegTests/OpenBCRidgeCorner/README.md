@@ -144,6 +144,18 @@ All at the lowest model level (20 m AGL); terrain colored 0-300 m.
   `nofire` figures at the same times for the visual counterpart of the
   table above.
 
+## WRF-Fire comparison: is this ERF-specific?
+
+`wrf_comparison/` runs the identical physical setup (same terrain, same
+Open BCs on all four sides, same wind, same top damping, same horizontal
+advection order) in WRF-Fire instead. **Result: WRF stays stable where ERF
+does not** -- WRF's wind speed grows only 3 -> ~6 m/s over the same 300 s
+window where ERF's grows past 400 m/s. See `wrf_comparison/README.md` for
+the full settings-matching table, build/run instructions, and the wind
+extraction script. This points at an ERF-specific numerical robustness
+gap, not an inherent flaw in the "ridge crosses near/through an open
+boundary" domain design itself.
+
 ## Still open
 
 The corner double-write bug is fixed and verified (this deck, and directly

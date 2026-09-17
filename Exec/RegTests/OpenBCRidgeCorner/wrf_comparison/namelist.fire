@@ -1,0 +1,55 @@
+&fuel_scalars                      ! scalar fuel constants
+! cmbcnst must be derived through WRF's OWN fuelheat=cmbcnst*4.30e-4
+! conversion (module_fr_fire_phys.F:942), not the true BTU/kg factor, so
+! that fuelheat itself lands on Anderson FM1's 8000 BTU/lb once WRF divides
+! back out: cmbcnst = 8000 / 4.30e-4 = 18604651 J/kg. See
+! ERF/WRF_ERF_fuel_moisture_heat_content_comparison.md.
+cmbcnst  = 18604651.0,             ! J/kg heat of combustion of dry fuel -- matches ERF's fire model constant via WRF's own 4.30e-4 conversion
+hfgl     = 17.e4 ,                 ! W/m^2 threshold heat flux required to ignite canopy
+fuelmc_g = 0.10,                   ! surface dead fuel moisture -- matches erf.fire.moisture_1hr = 0.10 (hill_simple default)
+fuelmc_c = 1.00,                   ! canopy fuel moisture, set = 0 for dry
+nfuelcats = 13,                    ! number of fuel categories used
+no_fuel_cat = 14                   ! extra category for no fuel
+/
+
+&fuel_categories
+ fuel_name =
+'1: Short grass (1 ft)',
+'2: Timber (grass and understory)',
+'3: Tall grass (2.5 ft)',
+'4: Chaparral (6 ft)',
+'5: Brush (2 ft) ',
+'6: Dormant brush, hardwood slash',
+'7: Southern rough',
+'8: Closed timber litter',
+'9: Hardwood litter',
+'10: Timber (litter + understory)',
+'11: Light logging slash',
+'12: Medium logging slash',
+'13: Heavy logging slash',
+'14: no fuel'
+! fgi left at its raw Anderson dry value (0.166 = ERF's w_d1=0.034 lb/ft^2).
+! WRF's own (1-bmst) wet-to-dry shrinkage (module_fr_fire_phys.F:1359-1360)
+! is now left in place rather than pre-cancelled here -- ERF's
+! erf.fire.wrf_bmst_compat=true (inputs) applies the matching shrinkage on
+! ERF's side instead, using ERF's live moisture field rather than assuming
+! a single static value. See
+! ERF/WRF_ERF_fuel_moisture_heat_content_comparison.md and
+! ERF_fire_advective/CLAUDE.md's wrf_bmst_compat section.
+ fgi =   0.166, 0.896, 0.674, 3.591, 0.784, 1.344, 1.091,
+         1.120, 0.780, 2.692, 2.582, 7.749, 13.024, 1.e-7,
+ fueldepthm=0.305, 0.305, 0.762, 1.829, 0.61,  0.762, 0.762,
+            0.061, 0.061, 0.305, 0.305, 0.701, 0.914, 0.305,
+ savr = 3500., 2784., 1500., 1739., 1683., 1564., 1562.,
+        1889., 2484., 1764., 1182., 1145., 1159., 3500.,
+ fuelmce = 0.12, 0.15, 0.25, 0.20, 0.20, 0.25, 0.40,
+           0.30, 0.25, 0.25, 0.15, 0.20, 0.25, 0.12,
+ fueldens = 32.,32.,32.,32.,32.,32.,32. ,
+            32.,32.,32.,32.,32.,32.,32. , ! 32 if solid, 19 if rotten
+ st = 0.0555, 0.0555, 0.0555, 0.0555, 0.0555, 0.0555, 0.0555,
+      0.0555, 0.0555, 0.0555, 0.0555, 0.0555, 0.0555, 0.0555,
+ se = 0.010, 0.010, 0.010, 0.010, 0.010, 0.010, 0.010,
+      0.010, 0.010, 0.010, 0.010, 0.010, 0.010, 0.010,
+ weight = 7.,  7.,  7., 180., 100., 100., 100.,
+         900., 900., 900., 900., 900., 900., 7. ,
+ /
