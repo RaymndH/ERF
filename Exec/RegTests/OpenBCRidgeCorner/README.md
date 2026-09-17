@@ -4,7 +4,10 @@ Just the wind and the ridge: the smallest atmosphere-only setup built to
 investigate the corner instability behind the Open BC corner double-write
 fix (`Source/Advection/ERF_AdvectionSrcForMom.cpp` /
 `ERF_AdvectionSrcForState.cpp`), with everything fire-specific stripped out
-except a with/without fire-mesh comparison.
+except a with/without fire-mesh comparison. Partial fix stops ERF's advection 
+code from writing a corner cell twice at Open-BC corners (once correctly, 
+once with corrupted ghost-cell data from the perpendicular direction's stencil) 
+by shrinking each direction's box so every corner is written exactly once.
 
 **Read this whole file before trusting a single number out of context.**
 The headline result is more nuanced than "the fix solves it": the fix is a
