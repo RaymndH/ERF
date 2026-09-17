@@ -129,6 +129,7 @@ target_sources(${erf_exe_name}
     # exactly one of them must own the tangential-advection box, or the
     # corner cell is written twice (once from a ghost-cell-corrupted read).
     ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestOpenBCCornerBox.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestMinimalCornerDemo.cpp
     # Motivation: the chamber profile and perturbation must remain analytic,
     # bounded, and independent of MPI decomposition and tile shape.
     ${CMAKE_CURRENT_SOURCE_DIR}/Prob/ERF_GTestCloudChamber.cpp
