@@ -59,6 +59,28 @@ WRF does pick up more over 30 min (plausible terrain-wake/gravity-wave
 accumulation, not investigated further here), but stays roughly two orders
 of magnitude below ERF's growth over the same timescale.
 
+## Figures
+
+`plot_wind_terrain_wrf.py` is the WRF-side counterpart of
+`../plot_wind_terrain.py`, using the same conventions (fixed 3 m/s <-> 100 m
+quiver scale, same mixed-corner boxes, same 0-300 m terrain color range):
+
+```
+python3 plot_wind_terrain_wrf.py 0      # t=0s
+python3 plot_wind_terrain_wrf.py 300    # t=300s
+```
+Needs `matplotlib` and `netCDF4`. Run from the WRF case directory (where
+`wrfout_d01_*` live), not from here.
+
+- `wind_terrain_wrf_t00000.png` -- t=0s, wind exactly uniform (identical
+  setup to ERF's `../wind_terrain_nofire_t00000.png`).
+- `wind_terrain_wrf_t00060.png` -- t=60s, still essentially uniform.
+- `wind_terrain_wrf_t00300.png` -- t=300s, only mild distortion near the
+  ridge crest -- compare directly against ERF's `../wind_terrain_nofire_t00300.png`
+  at the same simulation time, which by then shows severe, domain-wide
+  chaotic flow. This is the visual counterpart of the growth-rate table
+  above.
+
 ## Build
 
 This uses the WRF-Fire checkout at `WRF4_fire/WRF` on this machine,
