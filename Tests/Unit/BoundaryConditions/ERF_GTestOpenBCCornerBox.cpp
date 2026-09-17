@@ -1,17 +1,23 @@
 #include <AMReX_Box.H>
+#include <AMReX_FArrayBox.H>
 
 #include <ERF_Advection.H>
 
 #include <gtest/gtest.h>
 
+using amrex::Array4;
 using amrex::Box;
+using amrex::FArrayBox;
+using amrex::GpuArray;
 using amrex::IntVect;
+using amrex::Real;
 
 namespace {
 
-// A small stand-in for a single 2D slab of a fire-relevant domain: cells
-// (0..9, 0..9, 0), matching the kind of domain the corner bug was found on
-// (a rotated ridge case with Open BCs on all four lateral faces).
+// A small, generic domain (cells 0..9, 0..9, 0) with two perpendicular
+// Open faces -- the geometry-independent minimum needed to reproduce this
+// bug. Any domain with two adjacent Open lateral faces has this corner
+// regardless of what terrain or flow is or isn't present near it.
 Box test_domain () { return Box(IntVect(0, 0, 0), IntVect(9, 9, 0)); }
 
 // Motivation: with neither adjacent face open, the tangential box used for
@@ -106,6 +112,110 @@ TEST(OpenBCCornerBox, NormalAndShrunkTangentBoxesDoNotShareTheCorner)
         << "the shrunk tangential box must not overlap the corner the "
            "normal-direction box already owns -- if it does, the corner "
            "cell is written twice per step, reintroducing the bug";
+}
+
+// Motivation: the production kernel itself, not just its box geometry, must
+// not read past-domain ghost data at a corner. This calls the real
+// AdvectionSrcForOpenBC_Tangent_Xmom (used for the ylo/yhi_open branches'
+// tbx_ylo/tbx_yhi boxes) directly on a hand-built field, on a small flat
+// (no terrain, ax=az=detJ=1) domain with x ALSO open at its high end
+// (xhi_open) -- so the corner cell (3,0,0) sits where this y-tangential
+// box would, before the fix, overlap the x-normal box's territory.
+//
+// Rather than hand-deriving the "correct" flux value at the corner (there
+// isn't a well-defined one -- that's the whole point: the corner belongs
+// to the x-normal treatment, not this one), this proves corruption the
+// more direct way: a physically meaningful result for an in-domain cell
+// must not depend on what's sitting in the ghost cell one step outside
+// the domain. Two runs that differ only in that single ghost value must
+// give the SAME answer at (3,0,0) if the kernel is well-behaved there.
+// Before the fix (unshrunk box), they don't. After the fix (shrunk box),
+// the cell isn't touched by this function at all, so it trivially can't
+// depend on the ghost -- confirmed by checking it stays at its untouched
+// sentinel value regardless of the poison.
+TEST(OpenBCCornerBox, TangentMomentumKernelCornerDoesNotDependOnGhostData)
+{
+    // Flat, uniform-grid domain: i=0..3, one row (j=0) at the ylo boundary,
+    // one z-layer. xhi_open=true makes i=3 a corner column. Ghost padding
+    // wide enough for every i/j/k +-1 access the kernel makes internally.
+    const Box grown(IntVect(-2, -2, -2), IntVect(5, 2, 2));
+    const Box bxx_unfixed(IntVect(0, 0, 0), IntVect(3, 0, 0)); // full row, incl. corner i=3
+
+    auto build_fields = [&](Real poison_at_ghost, FArrayBox& rho_u_rhs_fab,
+                             FArrayBox& u_fab, FArrayBox& rho_u_fab, FArrayBox& rho_v_fab,
+                             FArrayBox& omega_fab, FArrayBox& ax_fab, FArrayBox& az_fab,
+                             FArrayBox& detJ_fab, Real sentinel)
+    {
+        rho_u_rhs_fab.resize(grown, 1); rho_u_rhs_fab.setVal<amrex::RunOn::Host>(sentinel);
+        u_fab.resize(grown, 1);
+        rho_u_fab.resize(grown, 1);
+        rho_v_fab.resize(grown, 1);     rho_v_fab.setVal<amrex::RunOn::Host>(Real(1.0));
+        omega_fab.resize(grown, 1);     omega_fab.setVal<amrex::RunOn::Host>(Real(0.0));
+        ax_fab.resize(grown, 1);        ax_fab.setVal<amrex::RunOn::Host>(Real(1.0));
+        az_fab.resize(grown, 1);        az_fab.setVal<amrex::RunOn::Host>(Real(1.0));
+        detJ_fab.resize(grown, 1);      detJ_fab.setVal<amrex::RunOn::Host>(Real(1.0));
+
+        const auto u_arr = u_fab.array();
+        const auto rho_u_arr = rho_u_fab.array();
+        const Real U0 = Real(10.0), SLOPE = Real(0.5);
+        const Real RHO0 = Real(1.2), RSLOPE = Real(0.01);
+        amrex::LoopOnCpu(grown, [&](int i, int j, int k)
+        {
+            if (i <= 3) {
+                u_arr(i, j, k, 0)     = U0 + SLOPE * Real(i);
+                rho_u_arr(i, j, k, 0) = RHO0 + RSLOPE * Real(i);
+            } else {
+                // i == 4: exactly the ghost cell AdvectionSrcForOpenBC_Tangent_Xmom
+                // reads via rho_u(i+1,...)/u(i+1,...) at the corner column i=3,
+                // one step outside the domain (xhi boundary is at i=3). A
+                // well-behaved boundary kernel must not depend on this value.
+                u_arr(i, j, k, 0)     = poison_at_ghost;
+                rho_u_arr(i, j, k, 0) = poison_at_ghost;
+            }
+        });
+    };
+
+    const bool xlo_open = false, xhi_open = true;
+    const Box bxx_fixed = ShrinkTangentBoxForOpenBCCorner(bxx_unfixed, /*dim=*/0, xlo_open, xhi_open);
+    ASSERT_FALSE(bxx_fixed.contains(IntVect(3, 0, 0)))
+        << "sanity check: the fix must exclude the corner column from this box";
+
+    const GpuArray<Real, AMREX_SPACEDIM> cellSizeInv{Real(1.0), Real(1.0), Real(1.0)};
+    const Real sentinel = Real(-999.0);
+
+    Real corner_result_unfixed[2];
+    for (int trial = 0; trial < 2; ++trial) {
+        const Real poison = (trial == 0) ? Real(1.0e6) : Real(-3.7e6);
+        FArrayBox rho_u_rhs_fab, u_fab, rho_u_fab, rho_v_fab, omega_fab, ax_fab, az_fab, detJ_fab;
+        build_fields(poison, rho_u_rhs_fab, u_fab, rho_u_fab, rho_v_fab,
+                     omega_fab, ax_fab, az_fab, detJ_fab, sentinel);
+
+        AdvectionSrcForOpenBC_Tangent_Xmom(
+            bxx_unfixed, /*dir=*/1, rho_u_rhs_fab.array(), u_fab.array(), rho_u_fab.array(),
+            rho_v_fab.array(), omega_fab.array(), ax_fab.array(), az_fab.array(),
+            detJ_fab.array(), cellSizeInv, /*do_lo=*/true);
+
+        corner_result_unfixed[trial] = rho_u_rhs_fab(IntVect(3, 0, 0));
+    }
+    EXPECT_NE(corner_result_unfixed[0], corner_result_unfixed[1])
+        << "before the fix, the corner's result changed when only an out-of-domain "
+           "ghost cell changed -- confirming it reads data it has no business reading";
+
+    for (int trial = 0; trial < 2; ++trial) {
+        const Real poison = (trial == 0) ? Real(1.0e6) : Real(-3.7e6);
+        FArrayBox rho_u_rhs_fab, u_fab, rho_u_fab, rho_v_fab, omega_fab, ax_fab, az_fab, detJ_fab;
+        build_fields(poison, rho_u_rhs_fab, u_fab, rho_u_fab, rho_v_fab,
+                     omega_fab, ax_fab, az_fab, detJ_fab, sentinel);
+
+        AdvectionSrcForOpenBC_Tangent_Xmom(
+            bxx_fixed, /*dir=*/1, rho_u_rhs_fab.array(), u_fab.array(), rho_u_fab.array(),
+            rho_v_fab.array(), omega_fab.array(), ax_fab.array(), az_fab.array(),
+            detJ_fab.array(), cellSizeInv, /*do_lo=*/true);
+
+        EXPECT_EQ(rho_u_rhs_fab(IntVect(3, 0, 0)), sentinel)
+            << "after the fix, the corner cell must not be written by this function "
+               "at all, regardless of what garbage sits in its ghost cell";
+    }
 }
 
 } // namespace
