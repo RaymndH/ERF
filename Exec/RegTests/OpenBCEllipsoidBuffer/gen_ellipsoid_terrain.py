@@ -7,13 +7,25 @@ same head-on-incidence convention as gen_ridge_terrain.py), and kept well
 clear of every boundary -- unlike the ridge, which ran through the domain
 edges/corners.
 
-Semi-axes a=1700 m (major, along the crest direction), b=1000 m (minor,
-matching the ridge's minor-direction slope so this is a fair steepness
-comparison, not just a smaller feature);
-height 300 m, same as the ridge. Centered at domain center (2600,2600).
-Rotated bounding half-extent from the center: ~1523 m in x, ~1253 m in y
--- more than 1000 m of flat clearance to every boundary, comfortably past
-the requested 600 m minimum.
+Semi-axes a, b below (see the A, B assignment for the current run's
+values -- this docstring is written generically since a has been changed
+between runs, e.g. a=1700 and a=2500). b matches the ridge's
+minor-direction slope (300 m rise over 1000 m) so this is a fair
+steepness comparison, not just a smaller feature; height 300 m, same as
+the ridge. Centered at domain center (2600,2600).
+
+Rotated bounding half-extent of an ELLIPSE (not a rotated rectangle --
+mind the difference, an earlier version of this docstring used the wrong,
+overly conservative Minkowski-sum-of-a-rectangle formula):
+
+    x_half = sqrt((a*cos(theta))^2 + (b*sin(theta))^2)
+    y_half = sqrt((a*sin(theta))^2 + (b*cos(theta))^2)
+
+with theta = 34 deg. For a=1700, b=1000: x_half ~ 1516 m, y_half ~ 1261 m
+-> clearance ~1084 m / ~1339 m (well past the original 600 m minimum).
+For a=2500, b=1000: x_half ~ 2147 m, y_half ~ 1625 m -> clearance ~453 m
+/ ~975 m (x-clearance intentionally accepted just under 600 m to test a
+longer ellipsoid; both codes stayed stable regardless -- see README.md).
 
 Raised-cosine radial profile in the elliptical metric (C1 at the r=1
 edge, same smoothness convention as the ridge's clamped-cosine profile):
@@ -37,7 +49,7 @@ import math
 L = 5200.0
 HEIGHT = 300.0
 CX, CY = 2600.0, 2600.0
-A, B = 1700.0, 1000.0        # semi-major, semi-minor [m]
+A, B = 2500.0, 1000.0        # semi-major, semi-minor [m]
 THETA_DEG = 34.0            # same wind bearing as OpenBCRidgeCorner
 
 _TH = math.radians(THETA_DEG)

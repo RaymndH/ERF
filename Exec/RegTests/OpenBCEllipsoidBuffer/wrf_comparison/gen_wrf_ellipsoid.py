@@ -9,7 +9,7 @@ import math
 
 CX, CY = 2600.0, 2600.0
 HEIGHT = 300.0
-A, B = 1700.0, 1000.0
+A, B = 2500.0, 1000.0
 THETA_DEG = 34.0
 
 _TH = math.radians(THETA_DEG)
