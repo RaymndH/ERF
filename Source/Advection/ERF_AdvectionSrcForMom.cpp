@@ -202,22 +202,9 @@ AdvectionSrcForMom (const MFIter& mfi,
 
     const int domhi_z = domain.bigEnd(2);
 
-    // Special advection operator for open BC (bndry normal/tangent operations)
-    // Corner cells where an x-open and a y-open boundary meet would otherwise be
-    // written twice -- once by the boundary-normal formula (the actual open/
-    // radiative BC physics) and once by the orthogonal direction's tangential
-    // stencil (a plain advection formula never designed to be evaluated with an
-    // out-of-domain neighbor at that same corner) -- with the second silently
-    // overwriting the first via plain assignment. That tangential formula reads
-    // one cell beyond the corner in its own "interior" direction, which is a
-    // ghost cell here, so the corner's momentum RHS was effectively corrupted
-    // every step. Confirmed as the root cause of a runaway |w| growth (20 -> 100
-    // m/s over the first few minutes) at exactly such a corner in the rotated-
-    // ridge 34deg case (WRF's open_xs/xe/ys/ye has no such issue, so this is
-    // ERF-side only). Fix: shrink each tangential box to exclude corner cells
-    // already owned by the boundary-normal treatment for u/v, and by convention
-    // let x-direction own the w corner (no natural "normal" owner exists for w
-    // tangent to both x and y), so every corner cell is written exactly once.
+    // Special advection operator for open BC (bndry normal/tangent operations).
+    // Shrink each tangential box below to avoid double-writing corner cells
+    // where an x-open and a y-open boundary meet (see ShrinkTangentBoxForOpenBCCorner).
     if (xlo_open)
     {
         Box tbx_xlo, tby_xlo, tbz_xlo;
