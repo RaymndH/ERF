@@ -452,6 +452,34 @@ struct FireParams
     // "fbp"          — Canadian Forest Fire Behavior Prediction System (ERF_FbpModel.H)
     std::string       ros_model = "rothermel";  ///< ROS model selector
 
+    // The Rothermel/BEHAVE reaction-velocity exponent A (Gamma' = Gamma'_max *
+    // (beta/beta_op)^A * exp(A*(1-beta/beta_op))) has two non-equivalent
+    // published forms, erf.fire.reaction_velocity_formula:
+    //   "albini" (default, backward compatible) — Albini's (1976, GTR-INT-30)
+    //                        reformulation, A = 133 * sigma^-0.7913, ERF's
+    //                        form since this was first implemented.
+    //   "rothermel"        — Rothermel's (1972) original form,
+    //                        A = 1 / (4.774 * sigma^0.1 - 7.27), as used by
+    //                        WRF-Fire (module_fr_fire_phys.F). This form has a
+    //                        pole at sigma ~= 67 ft^-1, below which A goes
+    //                        negative; ERF_Rothermel.cpp's minimum-SAV guard
+    //                        (sigma >= 100) keeps every call safely above it.
+    // Only affects ros_model = "rothermel"; BEHAVE (ERF_BehaveModel.H) keeps
+    // its own independent copy of the Albini form regardless of this option.
+    std::string       reaction_velocity_formula = "albini";
+
+    // WRF-Fire compatibility: WRF-Fire's fgip is nominally the same
+    // Anderson-table oven-dry load ERF uses for w_d1/w_d10/w_d100/w_lh/w_lw,
+    // but module_fr_fire_phys.F treats it as a *wet* mass (dry fuel plus
+    // adsorbed moisture) and strips a water fraction out before it ever
+    // reaches Rothermel: fuelloadm = (1-bmst)*fgip, bmst = fmc_g/(1+fmc_g).
+    // Since Anderson's tables are already oven-dry, this is a WRF-specific
+    // deflation of the fuel load actually fed to Rothermel, not a physical
+    // correction -- default false so ERF's own fuel load stays the true dry
+    // value. Set true (erf.fire.wrf_bmst_compat) to reproduce WRF-Fire's ROS
+    // bit-for-bit given otherwise-identical fuel-table/heat-content inputs.
+    bool              wrf_bmst_compat = false;
+
     // Phase 13B: Balbi (2009) physical fire spread model parameters.
     // Only used when ros_model = "balbi".
     // Defaults from Balbi (2009) Table 1.
@@ -1118,6 +1146,9 @@ struct FireParams
        // Phase 13B: ROS model selection
        pp.query("ros_model", ros_model);
        one_of("ros_model", ros_model, {"rothermel", "behave", "balbi", "fbp", "hybrid", "prescribed", "cheney_gould", "macarthur"});
+       pp.query("reaction_velocity_formula", reaction_velocity_formula);
+       one_of("reaction_velocity_formula", reaction_velocity_formula, {"albini", "rothermel"});
+       pp.query("wrf_bmst_compat", wrf_bmst_compat);
        pp.query("rothermel_per_fuel", rothermel_per_fuel);
 
        // Hybrid ROS

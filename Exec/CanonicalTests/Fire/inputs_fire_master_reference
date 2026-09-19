@@ -356,6 +356,14 @@ erf.fire.ros_model = "rothermel"
 # of the domain fuel_model_id. No effect without erf.fire.fuel_map.file.
 erf.fire.rothermel_per_fuel = false
 
+# Rothermel/BEHAVE reaction-velocity exponent A (needs ros_model = "rothermel"):
+# "albini"    (default) Albini's (1976, GTR-INT-30) reformulation, ERF's own
+#             form, A = 133*sigma^-0.7913
+# "rothermel" Rothermel's (1972) original form, A = 1/(4.774*sigma^0.1-7.27),
+#             as used by WRF-Fire; has a pole near sigma = 67 ft^-1, safely
+#             below ERF's minimum-SAV guard (sigma clamped to >= 100)
+erf.fire.reaction_velocity_formula = "albini"
+
 # ============================================================================
 # PRESCRIBED RATE OF SPREAD (used only when ros_model = "prescribed")
 # ============================================================================

@@ -249,6 +249,24 @@ struct RothermelComputed
  *
  * @param[in] fp FuelModelParams for selected fuel model
  * @param[in] use_wind_limit  Apply the MEWS cap (erf.fire.use_wind_limit)
+ * @param[in] use_rothermel_a_formula  Select the reaction-velocity exponent A:
+ *                        false (default) Albini's (1976, GTR-INT-30) form,
+ *                        A = 133*sigma^-0.7913 (ERF's original behavior);
+ *                        true WRF-Fire's Rothermel (1972) original form,
+ *                        A = 1/(4.774*sigma^0.1-7.27)
+ *                        (erf.fire.reaction_velocity_formula = "rothermel").
+ *                        The WRF form has a pole at sigma ~= 67 ft^-1; this
+ *                        function's minimum-SAV guard (sigma >= 100) keeps
+ *                        every call safely above it.
+ * @param[in] wrf_bmst_compat  Deflate the total dry fuel load w_0 by
+ *                        (1-bmst), bmst = M_f/(1+M_f), before it feeds
+ *                        w_n/rho_b/beta/I_R/xi/R0 -- reproduces WRF-Fire's
+ *                        fuelloadm = (1-bmst)*fgip (module_fr_fire_phys.F),
+ *                        which treats its (Anderson-derived) fgip as a wet
+ *                        mass and strips adsorbed water before Rothermel.
+ *                        Default false: ERF's w_d1/w_d10/... are already
+ *                        oven-dry, so this is a WRF-compatibility knob, not
+ *                        a physical correction (erf.fire.wrf_bmst_compat).
  * @return RothermelComputed with precomputed coefficients
  *
  * Implements the full Rothermel model:
@@ -262,7 +280,9 @@ RothermelComputed compute_rothermel_params(const FuelModelParams& fp,
                                            amrex::Real moisture_1hr,
                                            amrex::Real moisture_10hr,
                                            amrex::Real moisture_100hr,
-                                           bool use_wind_limit = true);
+                                           bool use_wind_limit = true,
+                                           bool use_rothermel_a_formula = false,
+                                           bool wrf_bmst_compat = false);
 
 /**
  * @brief Compute rate-of-spread for a single fire cell (GPU kernel)
@@ -384,6 +404,11 @@ inline constexpr int ROTHERMEL_TABLE_SIZE = 54;   ///< FUEL_SLOT_COUNT: 0 non-bu
  * @param[in] moisture_10hr  10-hour dead fuel moisture [fraction]
  * @param[in] moisture_100hr 100-hour dead fuel moisture [fraction]
  * @param[in] use_wind_limit Apply the MEWS cap (erf.fire.use_wind_limit)
+ * @param[in] use_rothermel_a_formula Select the reaction-velocity A formula;
+ *                        see compute_rothermel_params()
+ *                        (erf.fire.reaction_velocity_formula = "rothermel")
+ * @param[in] wrf_bmst_compat Deflate w_0 by (1-bmst) before Rothermel; see
+ *                        compute_rothermel_params() (erf.fire.wrf_bmst_compat)
  * @return host-side vector of size ROTHERMEL_TABLE_SIZE
  */
 std::vector<RothermelComputed> build_fuel_rothermel_table(
@@ -392,7 +417,9 @@ std::vector<RothermelComputed> build_fuel_rothermel_table(
     amrex::Real moisture_100hr,
     int fuel_set = 0,
     amrex::Real moisture_live = -1.0,
-    bool use_wind_limit = true);
+    bool use_wind_limit = true,
+    bool use_rothermel_a_formula = false,
+    bool wrf_bmst_compat = false);
 
 /**
  * @brief Compute the rate-of-spread field with per-cell Rothermel coefficients

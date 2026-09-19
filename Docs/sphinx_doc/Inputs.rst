@@ -4650,6 +4650,12 @@ Rate of spread
 |                                                |                                                            | "balbi", "hybrid",             |                        |
 |                                                |                                                            | "prescribed"                   |                        |
 +------------------------------------------------+------------------------------------------------------------+--------------------------------+------------------------+
+| **erf.fire.reaction_velocity_formula**         | Rothermel's reaction-velocity exponent A: Albini's (1976)  | "albini", "rothermel"          | "albini"               |
+|                                                | reformulation (ERF's own form), or Rothermel's (1972)      |                                |                        |
+|                                                | original form (WRF-Fire); the latter has a pole near       |                                |                        |
+|                                                | sigma = 67 ft^-1, safely below ERF's minimum-SAV guard;    |                                |                        |
+|                                                | needs ros_model = rothermel                                |                                |                        |
++------------------------------------------------+------------------------------------------------------------+--------------------------------+------------------------+
 | **erf.fire.directional_ros**                   | Evaluate the rate along the front normal on the level-set  | Boolean                        | true                   |
 |                                                | path; false spreads the head rate in every direction       |                                |                        |
 +------------------------------------------------+------------------------------------------------------------+--------------------------------+------------------------+
