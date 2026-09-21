@@ -1,0 +1,5 @@
+FILE = inputs_base
+
+# ERF's own default formula, WRF compatibility off (both left at their
+# compiled defaults on purpose -- this deck is the baseline).
+erf.fire.fire_stats_csv_file = "fire_stats_albini.csv"

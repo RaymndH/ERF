@@ -1,0 +1,4 @@
+FILE = inputs_base
+
+erf.fire.wrf_bmst_compat = true
+erf.fire.fire_stats_csv_file = "fire_stats_albini_bmst.csv"

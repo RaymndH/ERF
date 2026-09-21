@@ -1,0 +1,4 @@
+FILE = inputs_base
+
+erf.fire.reaction_velocity_formula = "rothermel"
+erf.fire.fire_stats_csv_file = "fire_stats_rothermel.csv"

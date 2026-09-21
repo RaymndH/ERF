@@ -1,0 +1,79 @@
+# FireReactionVelocityFormula: does ERF's actual simulated head ROS (the
+# rate along the wind-aligned front-normal direction) match the closed-form
+# theoretical Rothermel Rf for each combination of
+# erf.fire.reaction_velocity_formula ("albini" | "rothermel") and
+# erf.fire.wrf_bmst_compat (false | true)? See README.md.
+#
+# One-way coupled (erf.fire.fire_atm_feedback = 0) with a constant prescribed
+# wind aligned with the line fire's spread direction (erf.fire.prescribed_wind),
+# so the wind driving Rothermel's phi_w term is exact and known. Single fuel
+# model (FM1, short grass). Short run (60s): the ROS is algebraic (not
+# diffusion-limited), so it reaches its steady value immediately and a single
+# reading is enough -- this is not a front-tracking/reinit test.
+geometry.prob_lo = 0.0 0.0 0.0
+geometry.prob_hi = 6000.0 3000.0 500.0
+amr.n_cell = 120 60 20
+geometry.is_periodic = 1 1 0
+amr.max_level = 0
+amr.max_grid_size = 30
+amr.max_grid_size_z = 20
+
+zlo.type = "surface_layer"
+zhi.type = "SlipWall"
+erf.most.z0 = 0.01
+erf.most.surf_temp = 300.0
+erf.most.surf_heating_rate = 0.0
+
+erf.molec_diff_type = "None"
+erf.les_type = "Smagorinsky"
+erf.Cs = 0.1
+erf.use_gravity = true
+erf.use_coriolis = false
+erf.theta_ref = 300.0
+
+erf.init_type = "input_sounding"
+erf.sounding_type = Ideal
+erf.input_sounding_file = "input_sounding"
+
+erf.fixed_dt = 1.0
+erf.substepping_cfl = 0.5
+max_step = 100000
+stop_time = 60.0
+
+erf.v = 0
+amr.v = 0
+erf.sum_interval = -1
+erf.check_int = -1
+erf.plot_int = -1
+erf.fire_plot_int = -1          # no plotfiles needed -- fire_stats_csv is enough
+
+erf.fire.enable = true
+erf.fire.fire_debug = false
+erf.fire.grid_ratio = 2                    # 25 m fire cells
+erf.fire.propagation_method = "levelset"
+erf.fire.directional_ros = true            # head/backing/flanks from the front-normal projection
+erf.fire.fuel_model_id = 1                 # short grass (FM1), the only fuel used
+erf.fire.moisture_1hr = 0.06
+erf.fire.moisture_10hr = 0.08
+erf.fire.moisture_100hr = 0.10
+erf.fire.moisture_dynamic = false
+erf.fire.ignition_r = 0.0
+erf.fire.ignition_x = 500.0
+erf.fire.ignition_y = 1500.0
+erf.fire.ignition.polygon_file = "line_finite.csv"
+erf.fire.ignition.polygon_type = "polyline"
+erf.fire.ignition.polyline_width = 25.0
+erf.fire.wind_ref_ht = 6.1
+erf.fire.use_waf = false
+erf.fire.use_wind_limit = false            # keeps the theoretical Rf calc a simple closed form
+erf.fire.use_terrain_wind = false
+erf.fire.ros_model = "rothermel"
+erf.fire.write_fire_stats_csv = true
+erf.fire.coupling_type = "lagged"
+erf.fire.fire_atm_feedback = 0.0           # one-way
+
+# Constant prescribed wind, aligned with the line fire's head direction
+# (+x), bypassing atmospheric interpolation entirely.
+erf.fire.prescribed_wind   = true
+erf.fire.prescribed_wind_x = 4.005
+erf.fire.prescribed_wind_y = 0.0
