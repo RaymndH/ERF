@@ -210,6 +210,7 @@ if(ERF_ENABLE_FIRE)
     ${CMAKE_CURRENT_SOURCE_DIR}/Fire/ERF_GTestPrescribedFire.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Fire/ERF_GTestDirectionalShape.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Fire/ERF_GTestWindLimit.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Fire/ERF_GTestReactionVelocityFormula.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Fire/ERF_GTestFuelMap.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Fire/ERF_GTestStructureIgnition.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Fire/ERF_GTestFireSuppression.cpp
