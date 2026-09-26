@@ -380,6 +380,19 @@ amrex::Real directional_ellipse_speed(const DirectionalEllipse& d,
  * @param[in]  wind_coupling   DIRECTIONAL_WIND_COUPLING_PROJECTION (default) or
  *                     _ADVECTIVE; Rothermel-with-DIRECTIONAL_SHAPE_PROJECTION only,
  *                     see directional_ros_cell()
+ * @param[in]  grad_scheme  Scheme for the front normal's one-sided derivatives
+ *                     (fire_levelset::LevelSetGradient; UPWIND1/WENO5Z/WENO5Z_FRONT).
+ *                     Godunov-selected (the same max(D-,0)/min(D+,0) choice as
+ *                     godunov_norm_grad_phi), NOT central differences -- a plain
+ *                     central difference along the front is non-dissipative and
+ *                     odd-even-blind, which lets the wind's tangential-to-the-front
+ *                     component (dominant on the flanks, unlike the head-on normal
+ *                     component) leak through undamped wherever the flank is not
+ *                     grid-aligned. This was the rotation-invariance artifact:
+ *                     absent when wind/flank are grid-aligned (90/0deg), present
+ *                     and growing at oblique angles (34deg), with or without
+ *                     reinit. See CLAUDE.md "Leading hypothesis for the
+ *                     rotated-stack artifact" / Phase-1 Variant G.
  */
 inline void fill_directional_ros(amrex::MultiFab& R_mf,
                                  const amrex::MultiFab& phi,
@@ -392,7 +405,8 @@ inline void fill_directional_ros(amrex::MultiFab& R_mf,
                                  int shape = DIRECTIONAL_SHAPE_PROJECTION,
                                  int ellipse_lw = DIRECTIONAL_ELLIPSE_LW_MODEL,
                                  amrex::Real ellipse_lw_max = amrex::Real(8.0),
-                                 int wind_coupling = DIRECTIONAL_WIND_COUPLING_PROJECTION)
+                                 int wind_coupling = DIRECTIONAL_WIND_COUPLING_PROJECTION,
+                                 const fire_levelset::LevelSetGradient& grad_scheme = fire_levelset::LevelSetGradient{})
 {
     const amrex::Real dx = geom.CellSize(0);
     const amrex::Real dy = geom.CellSize(1);
@@ -418,12 +432,18 @@ inline void fill_directional_ros(amrex::MultiFab& R_mf,
             const amrex::Real dzdx = slopes_arr(i, j, k, 0);
             const amrex::Real dzdy = slopes_arr(i, j, k, 1);
 
-            // Front normal from central differences; it points toward increasing
-            // phi, that is into the unburned fuel.
-            const amrex::Real dpdx = (wall.at(phi_arr, i, j, k, 1, 0)
-                                      - wall.at(phi_arr, i, j, k, -1, 0)) / (2.0 * dx);
-            const amrex::Real dpdy = (wall.at(phi_arr, i, j, k, 0, 1)
-                                      - wall.at(phi_arr, i, j, k, 0, -1)) / (2.0 * dy);
+            // Front normal from Godunov-selected one-sided derivatives (same
+            // max(D-,0)/min(D+,0) choice as godunov_norm_grad_phi), NOT a plain
+            // central difference -- see the grad_scheme doc comment above for why.
+            amrex::Real dxm, dxp, dym, dyp;
+            fire_levelset::one_sided_derivatives(phi_arr, dx, i, j, k, 1, 0, grad_scheme, wall, dxm, dxp);
+            fire_levelset::one_sided_derivatives(phi_arr, dy, i, j, k, 0, 1, grad_scheme, wall, dym, dyp);
+            const amrex::Real ax = amrex::max(dxm, amrex::Real(0.0));
+            const amrex::Real bx = amrex::min(dxp, amrex::Real(0.0));
+            const amrex::Real ay = amrex::max(dym, amrex::Real(0.0));
+            const amrex::Real by = amrex::min(dyp, amrex::Real(0.0));
+            const amrex::Real dpdx = (ax * ax > bx * bx) ? ax : bx;
+            const amrex::Real dpdy = (ay * ay > by * by) ? ay : by;
             const amrex::Real grad = std::sqrt(dpdx*dpdx + dpdy*dpdy);
 
             if (shape == DIRECTIONAL_SHAPE_ELLIPSE) {
@@ -501,7 +521,7 @@ inline void advect_levelset_directional_rk3(amrex::MultiFab& phi,
     fire_levelset::advect_levelset_rk3_with_fill(phi, slopes, geom, dt, eps_visc,
         [&](amrex::MultiFab& R, const amrex::MultiFab& phi_stage) {
             fill_directional_ros(R, phi_stage, wind, slopes, geom, st, nonburnable, wall_extrap, shape,
-                                 ellipse_lw, ellipse_lw_max, wind_coupling);
+                                 ellipse_lw, ellipse_lw_max, wind_coupling, grad_scheme);
         }, nonburnable, wall_extrap, grad_scheme, ros_scale);
 }
 
