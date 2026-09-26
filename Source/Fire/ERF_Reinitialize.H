@@ -56,6 +56,19 @@ namespace fire_levelset {
  * result against the pre-reinit field so reinitialization can never revert an
  * already-burned cell (φ < 0) back to unburned.
  *
+ * A sign-preserving alternative was tried and rejected (2026-09-25): only
+ * reverting cells where reinit flipped which side of the front they were on,
+ * instead of clamping every cell to be no larger than before, lets error
+ * accumulate without bound over repeated reinit calls (reinit_every=1, one
+ * call per fire subcycle) -- on LineFireFlat/LineFireFlat34 it produced a
+ * severe, unphysical wedge cutting across the burned interior within 600 s,
+ * a strictly worse regression, not an improvement. The blunt min-clamp
+ * being one-sided everywhere is a real defect (the failing upstream test
+ * LevelSetAdvection.ReinitialisationRestoresUnitGradient documents it), but
+ * whatever the correct fix is, it needs its own bound on error growth; a bare
+ * sign check is not enough. Keep the min-clamp until a better-bounded
+ * alternative is found. See CLAUDE.md's reinit review notes.
+ *
  * Each iteration moves φ by at most dtau/L, so with the default
  * dtau = 0.5*min(dx,dy) the change per iteration is half a cell measured in
  * band lengths.
@@ -212,44 +225,58 @@ inline void reinitialize_phi(amrex::MultiFab& phi,
                     (p0c * p0yp < 0.0_rt) || (p0c * p0ym < 0.0_rt);
 
                 if (near_front) {
-                    // Russo & Smereka (2000) subcell distance: for each axis
-                    // direction where phi_0 actually crosses zero, linearly
-                    // interpolate phi_0 between the cell centre and that
-                    // neighbour to get the zero-crossing distance along that
-                    // direction, then combine the (up to 4) crossing
-                    // directions via the standard reciprocal-sum rule.
+                    // Per-axis gradient of phi_0, then D = phi_0 / |g| --
+                    // exact for a planar front at ANY angle to the grid,
+                    // unlike the reciprocal-sum rule this replaces.
                     //
-                    // This replaces an earlier version that combined ALL FOUR
-                    // one-sided differences (crossing or not) into a single
-                    // magnitude via sqrt(dcx^2+dcy^2) floored by the largest
-                    // one-sided jump. At a concave corner -- where two
-                    // non-crossing directions can have a much larger jump
-                    // than the actual crossing direction(s), e.g. from a
-                    // neighbour on the far side of the corner -- that
-                    // combined magnitude overestimates the true local
-                    // gradient and so underestimates the true
-                    // distance-to-interface. Verified against an exact
-                    // brute-force (marching-squares) ground truth at a
-                    // concave corner cell: the old formula was off by ~40%
-                    // (-14.7 vs the true -10.5); this one matches to <0.1%.
-                    Real inv_D2 = 0.0_rt;
-                    int n_cross = 0;
-                    auto accumulate_crossing = [&](Real p0n) {
-                        if (p0c * p0n < 0.0_rt) {
-                            Real Ddir = h * p0c / (p0c - p0n);
-                            inv_D2 += 1.0_rt / (Ddir * Ddir);
-                            ++n_cross;
-                        }
+                    // The reciprocal-sum rule (1/D^2 = sum 1/D_dir^2 over
+                    // crossing directions) is exact only when BOTH an x- and
+                    // a y-neighbour cross: on an oblique front many cells
+                    // cross in only ONE axis, where the true distance is the
+                    // axis intercept divided by cos(theta), not the intercept
+                    // itself -- the old rule used the bare intercept, so it
+                    // came out ~31% too large at 40deg from grid-aligned. It
+                    // also DOUBLE-counts when both x+ and x- cross (thin
+                    // strips, converging fronts near a corner), where the sum
+                    // of two reciprocal squares overweights a single true
+                    // crossing, making D too small by ~sqrt(2). Building an
+                    // actual per-axis gradient component (one-sided
+                    // difference toward whichever neighbour is nearer when
+                    // both cross that axis, the lone crossing neighbour's
+                    // difference when only one does, or a minmod of the two
+                    // one-sided differences when neither does -- so the
+                    // gradient stays defined and bounded even on axes with
+                    // no crossing at all) and dividing phi_0 by its norm
+                    // reduces to the ordinary planar-front distance formula
+                    // at any orientation, and only reduces to the old
+                    // reciprocal-sum answer in the special case both axes
+                    // cross with equal steepness.
+                    const Real d_xp = (p0xp - p0c) * hinv;  // forward one-sided derivative
+                    const Real d_xm = (p0c - p0xm) * hinv;  // backward one-sided derivative
+                    const Real d_yp = (p0yp - p0c) * hinv;
+                    const Real d_ym = (p0c - p0ym) * hinv;
+                    const bool cross_xp = (p0c * p0xp < 0.0_rt);
+                    const bool cross_xm = (p0c * p0xm < 0.0_rt);
+                    const bool cross_yp = (p0c * p0yp < 0.0_rt);
+                    const bool cross_ym = (p0c * p0ym < 0.0_rt);
+
+                    auto minmod = [](Real a, Real b) {
+                        if (a * b <= 0.0_rt) { return 0.0_rt; }
+                        return (std::abs(a) < std::abs(b)) ? a : b;
                     };
-                    accumulate_crossing(p0xp);
-                    accumulate_crossing(p0xm);
-                    accumulate_crossing(p0yp);
-                    accumulate_crossing(p0ym);
-                    // n_cross >= 1 is guaranteed by near_front, but guard
-                    // against a degenerate zero denominator regardless.
-                    const Real D = (n_cross > 0 && inv_D2 > 0.0_rt)
-                        ? sgn_phi0_hard / std::sqrt(inv_D2)
-                        : h * p0c;
+                    // "Nearer" crossing when both sides cross: the interface
+                    // is closer along the steeper (larger-magnitude) one-sided
+                    // difference (Ddir = h*p0c/diff shrinks as |diff| grows).
+                    auto axis_grad = [&](bool cp, bool cm, Real dp, Real dm) {
+                        if (cp && cm) { return (std::abs(dp) > std::abs(dm)) ? dp : dm; }
+                        if (cp) { return dp; }
+                        if (cm) { return dm; }
+                        return minmod(dm, dp);
+                    };
+                    const Real gx = axis_grad(cross_xp, cross_xm, d_xp, d_xm);
+                    const Real gy = axis_grad(cross_yp, cross_ym, d_yp, d_ym);
+                    const Real gnorm = std::sqrt(gx * gx + gy * gy + 1.0e-14_rt);
+                    const Real D = p0c / gnorm;
 
                     phi_new = phi_arr(i, j, k)
                             - dtau * hinv * (sgn_phi0_hard * std::abs(phi_arr(i, j, k)) - D * Linv);
@@ -278,6 +305,14 @@ inline void reinitialize_phi(amrex::MultiFab& phi,
     // reinitialization can never revert an already-burned cell back to
     // unburned, regardless of how the iterations above moved it. This is a
     // blunt backstop on top of, not instead of, the Russo-Smereka fix above.
+    //
+    // A sign-preserving alternative (only revert cells where reinit flipped
+    // which side of the front they were on, instead of clamping every cell)
+    // was tried and rejected: it let error accumulate unbounded over 2400
+    // steps of every-substep reinit, producing a severe wedge-shaped
+    // interior distortion on LineFireFlat/LineFireFlat34 within 600 s --
+    // strictly worse than this blunt clamp, not an improvement. See the
+    // file-comment note above and CLAUDE.md's reinit review.
     for (MFIter mfi(phi_work); mfi.isValid(); ++mfi) {
         const Box& bx = mfi.validbox();
         auto phi_arr = phi_work.array(mfi);
