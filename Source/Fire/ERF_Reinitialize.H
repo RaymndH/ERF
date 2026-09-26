@@ -83,6 +83,19 @@ namespace fire_levelset {
  * @param[in]     wall_extrap  Leave mask cells untouched and read neighbours
  *                         through a wall stencil, so the wall is a zero-gradient
  *                         boundary of the distance function rather than a front
+ * @param[in]     skip_final_clamp  Diagnostic only (default false = current,
+ *                         confirmed behavior). true disables the final
+ *                         min(phi_out, phi_in) monotonicity safeguard below,
+ *                         to test whether it is responsible for a slow,
+ *                         one-sided drift accumulating over many reinit calls.
+ *                         A prior sign-preserving-clamp variant of removing
+ *                         this safeguard was tried and rejected (2026-09-25,
+ *                         see CLAUDE.md): it let error run away unboundedly
+ *                         within 600s at reinit_every=1. This flag removes the
+ *                         safeguard entirely (no replacement clamp at all),
+ *                         which is expected to be at least as unstable -- it
+ *                         exists to confirm/quantify that failure mode, not as
+ *                         a candidate fix.
  */
 inline void reinitialize_phi(amrex::MultiFab& phi,
                               const amrex::Geometry& geom,
@@ -92,7 +105,8 @@ inline void reinitialize_phi(amrex::MultiFab& phi,
                               bool normalized = true,
                               const amrex::MultiFab* mask = nullptr,
                               bool wall_extrap = false,
-                              const LevelSetGradient& grad = LevelSetGradient{})
+                              const LevelSetGradient& grad = LevelSetGradient{},
+                              bool skip_final_clamp = false)
 {
     using namespace amrex;
 
@@ -313,14 +327,16 @@ inline void reinitialize_phi(amrex::MultiFab& phi,
     // interior distortion on LineFireFlat/LineFireFlat34 within 600 s --
     // strictly worse than this blunt clamp, not an improvement. See the
     // file-comment note above and CLAUDE.md's reinit review.
-    for (MFIter mfi(phi_work); mfi.isValid(); ++mfi) {
-        const Box& bx = mfi.validbox();
-        auto phi_arr = phi_work.array(mfi);
-        auto phi_orig = phi.const_array(mfi);
-        ParallelFor(bx, [=] AMREX_GPU_DEVICE (const IntVect& iv) noexcept {
-            int i = iv[0], j = iv[1], k = iv[2];
-            phi_arr(i, j, k) = amrex::min(phi_arr(i, j, k), phi_orig(i, j, k));
-        });
+    if (!skip_final_clamp) {
+        for (MFIter mfi(phi_work); mfi.isValid(); ++mfi) {
+            const Box& bx = mfi.validbox();
+            auto phi_arr = phi_work.array(mfi);
+            auto phi_orig = phi.const_array(mfi);
+            ParallelFor(bx, [=] AMREX_GPU_DEVICE (const IntVect& iv) noexcept {
+                int i = iv[0], j = iv[1], k = iv[2];
+                phi_arr(i, j, k) = amrex::min(phi_arr(i, j, k), phi_orig(i, j, k));
+            });
+        }
     }
 
     // Copy result back to phi
