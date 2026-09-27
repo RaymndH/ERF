@@ -119,7 +119,85 @@ std::pair<Real,Real> front_displacement (const MultiFab& phi, const LineShape& s
     return {sum / pts.size(), maxabs};
 }
 
+/// Circle of radius R0 about (CX+OFFX, CY+OFFY) -- same convention as T1's
+/// CircleShape (ERF_GTestReinitDrift.cpp). convex=true: burned inside
+/// (phi = r - R0); convex=false: burned outside (phi = R0 - r, concave).
+struct CircleShape
+{
+    Real R0, cx, cy; bool convex;
+    CircleShape (Real R, bool conv) : R0(R), cx(CX + OFFX), cy(CY + OFFY), convex(conv) {}
+    Real phi (Real x, Real y) const
+    {
+        const Real r = std::sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy));
+        return convex ? (r - R0) : (R0 - r);
+    }
+    std::vector<std::pair<Real,Real>> front_points (int n = 50) const
+    {
+        std::vector<std::pair<Real,Real>> pts;
+        for (int k = 0; k < n; ++k) {
+            const Real a = 2.0 * M_PI * k / n;
+            pts.emplace_back(cx + R0 * std::cos(a), cy + R0 * std::sin(a));
+        }
+        return pts;
+    }
+};
+
+void fill_exact (MultiFab& phi, const CircleShape& shape)
+{
+    for (MFIter mfi(phi); mfi.isValid(); ++mfi) {
+        const Box& bx = mfi.validbox();
+        auto arr = phi.array(mfi);
+        ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+            arr(i,j,k) = shape.phi(xc(i), yc(j));
+        });
+    }
+}
+
+template <class Shape>
+std::pair<Real,Real> front_displacement_t (const MultiFab& phi, const Shape& shape)
+{
+    Real sum = 0.0, maxabs = 0.0;
+    auto pts = shape.front_points();
+    for (auto& p : pts) {
+        const Real d = -interp(phi, p.first, p.second);
+        sum += d;
+        maxabs = amrex::max(maxabs, std::abs(d));
+    }
+    return {sum / pts.size(), maxabs};
+}
+
 } // namespace
+
+TEST(WrfReinitReference, CurvedFrontCreepConvexVsConcave)
+{
+    // Same R0=1000m, same domain/dx, same N checkpoints as T1
+    // (ReinitDrift.StaticFrontDisplacement's circle_convex_R1000 /
+    // circle_concave_R1000 cases), so results are directly comparable.
+    // WRF's own algorithm always applies its final min-clamp (there is no
+    // "unclamped" mode in WRF-Fire) -- fire_lsm_reinit_iter=1 (the campaign
+    // namelist default) is used as n_outer, called N times to match "N
+    // reinit calls" the same way T1 counts them for ERF.
+    Grid grid;
+    for (bool convex : {true, false}) {
+        CircleShape shape(1000.0, convex);
+        MultiFab phi(grid.ba, grid.dm, 1, 3);
+        fill_exact(phi, shape);
+
+        int done = 0;
+        MultiFab work(grid.ba, grid.dm, 1, 3);
+        work.ParallelCopy(phi);
+        for (int cp : {1, 10, 100, 1000}) {
+            for (int c = 0; c < cp - done; ++c) {
+                wrf_reinit_ls_rk3(work, grid.geom, /*n_outer=*/1, /*band_ngp=*/4.0);
+            }
+            done = cp;
+            auto [mean_d, max_d] = front_displacement_t(work, shape);
+            std::printf("[WrfReinitReference] shape=circle_%s_R1000 N=%4d  "
+                        "mean_disp=% .6f dx  max_disp=%.6f dx\n",
+                        convex ? "convex" : "concave", cp, mean_d / DX, max_d / DX);
+        }
+    }
+}
 
 TEST(WrfReinitReference, FlatFrontNoDriftAtObliqueAngles)
 {
