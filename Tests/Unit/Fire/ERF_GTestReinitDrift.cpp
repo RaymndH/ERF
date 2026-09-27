@@ -305,7 +305,8 @@ template <class Shape>
 void run_matrix (const Shape& shape, const char* shape_name, Grid& g,
                   bool skip_clamp, int iters,
                   std::vector<std::tuple<std::string,int,int,bool,DriftResult>>& all_results,
-                  Real dtau = 0.25 * DX)   // default: ERF_FireLayer.cpp's auto default
+                  Real dtau = 0.25 * DX,   // default: ERF_FireLayer.cpp's auto default
+                  bool disable_subcell_fix = false)
 {
     MultiFab phi(g.ba, g.dm, 1, 3), phi0(g.ba, g.dm, 1, 3);
     fill_phi(phi,  shape);
@@ -321,7 +322,8 @@ void run_matrix (const Shape& shape, const char* shape_name, Grid& g,
         const int n_calls = cp - done;
         for (int c = 0; c < n_calls; ++c) {
             reinitialize_phi(phi, g.geom, iters, dtau, -1.0, /*normalized=*/false,
-                              nullptr, false, LevelSetGradient{}, skip_clamp);
+                              nullptr, false, LevelSetGradient{}, skip_clamp,
+                              /*tvd_rk3=*/false, disable_subcell_fix);
             fire_fill_boundary(phi, g.geom);
         }
         done = cp;
@@ -442,6 +444,32 @@ TEST(ReinitDrift, CurvedFrontCreepWithWrfDtau)
         for (bool skip_clamp : {false, true}) {
             for (int iters : {1, 10}) {
                 run_matrix(shape, name, g, skip_clamp, iters, results, wrf_dtau);
+            }
+        }
+    }
+}
+
+/// Follow-up to CurvedFrontCreepWithWrfDtau: matching dtau to WRF's value
+/// did NOT stop the concave/advance pathway from compounding with N (still
+/// grew ~14x from N=1 to N=1000, vs WRF's reference staying flat at the
+/// identical dtau/geometry). This test isolates whether the Russo-Smereka
+/// near-front subcell override -- the one piece of ERF's scheme with no WRF
+/// analogue at all -- is what's actually responsible, by disabling JUST that
+/// branch (disable_subcell_fix=true) so every cell, near-front or not, uses
+/// the general Sussman/Godunov update, still at WRF's dtau=0.01*dx.
+TEST(ReinitDrift, CurvedFrontCreepSubcellFixDisabled)
+{
+    Grid g;
+    std::vector<std::tuple<std::string,int,int,bool,DriftResult>> results;
+    const Real wrf_dtau = 0.01 * DX;
+
+    for (bool convex : {true, false}) {
+        CircleShape shape(1000.0, convex);
+        const char* name = convex ? "circle_convex_R1000_nosubcell" : "circle_concave_R1000_nosubcell";
+        for (bool skip_clamp : {false, true}) {
+            for (int iters : {1, 10}) {
+                run_matrix(shape, name, g, skip_clamp, iters, results, wrf_dtau,
+                           /*disable_subcell_fix=*/true);
             }
         }
     }

@@ -53,7 +53,8 @@ amrex::Real reinit_rhs_cell(amrex::Array4<amrex::Real const> const& phi_state,
                              amrex::Real dx0, amrex::Real dx1,
                              amrex::Real h, amrex::Real hinv,
                              amrex::Real Lval, amrex::Real Linv,
-                             const LevelSetGradient& grad) noexcept
+                             const LevelSetGradient& grad,
+                             bool disable_subcell_fix = false) noexcept
 {
     using namespace amrex;
 
@@ -94,9 +95,9 @@ amrex::Real reinit_rhs_cell(amrex::Array4<amrex::Real const> const& phi_state,
     const Real p0xm = wall.at(phi_in, i, j, k, -1, 0);
     const Real p0yp = wall.at(phi_in, i, j, k, 0, 1);
     const Real p0ym = wall.at(phi_in, i, j, k, 0, -1);
-    const bool near_front =
-        (p0c * p0xp < 0.0_rt) || (p0c * p0xm < 0.0_rt) ||
-        (p0c * p0yp < 0.0_rt) || (p0c * p0ym < 0.0_rt);
+    const bool near_front = !disable_subcell_fix &&
+        ((p0c * p0xp < 0.0_rt) || (p0c * p0xm < 0.0_rt) ||
+         (p0c * p0yp < 0.0_rt) || (p0c * p0ym < 0.0_rt));
 
     if (near_front) {
         const Real d_xp = (p0xp - p0c) * hinv;
@@ -222,6 +223,17 @@ amrex::Real reinit_rhs_cell(amrex::Array4<amrex::Real const> const& phi_state,
  *                         step (Jiang & Peng's recommended time integrator for
  *                         this equation) using the SAME per-cell RHS -- see
  *                         the file doc comment above.
+ * @param[in]     disable_subcell_fix  Diagnostic only (default false =
+ *                         current, confirmed behavior). true disables the
+ *                         Russo-Smereka near-front override entirely, so
+ *                         EVERY cell (near-front or not) uses the general
+ *                         Sussman/Godunov update -- isolates whether the
+ *                         subcell branch itself is responsible for the
+ *                         non-saturating curvature-driven creep on curved
+ *                         fronts that WRF's reference implementation
+ *                         (which has no subcell fix at all) does not show
+ *                         at matched dtau. See CLAUDE.md's 2026-09-26
+ *                         addendum for the test this was built for.
  */
 inline void reinitialize_phi(amrex::MultiFab& phi,
                               const amrex::Geometry& geom,
@@ -233,7 +245,8 @@ inline void reinitialize_phi(amrex::MultiFab& phi,
                               bool wall_extrap = false,
                               const LevelSetGradient& grad = LevelSetGradient{},
                               bool skip_final_clamp = false,
-                              bool tvd_rk3 = false)
+                              bool tvd_rk3 = false,
+                              bool disable_subcell_fix = false)
 {
     using namespace amrex;
 
@@ -300,7 +313,7 @@ inline void reinitialize_phi(amrex::MultiFab& phi,
                     int i = iv[0], j = iv[1], k = iv[2];
                     if (wall.masked(i, j, k)) { out(i, j, k) = phi0_arr(i, j, k); return; }
                     Real Lr = detail::reinit_rhs_cell(phi0_arr, phi_in, wall, i, j, k,
-                                                       dx[0], dx[1], h, hinv, L, Linv, grad);
+                                                       dx[0], dx[1], h, hinv, L, Linv, grad, disable_subcell_fix);
                     Real v = phi0_arr(i, j, k) + dtau * Lr;
                     out(i, j, k) = normalized ? amrex::max(-1.0_rt, amrex::min(1.0_rt, v)) : v;
                 });
@@ -319,7 +332,7 @@ inline void reinitialize_phi(amrex::MultiFab& phi,
                     int i = iv[0], j = iv[1], k = iv[2];
                     if (wall.masked(i, j, k)) { out(i, j, k) = phi0_arr(i, j, k); return; }
                     Real Lr = detail::reinit_rhs_cell(phi1_arr, phi_in, wall, i, j, k,
-                                                       dx[0], dx[1], h, hinv, L, Linv, grad);
+                                                       dx[0], dx[1], h, hinv, L, Linv, grad, disable_subcell_fix);
                     Real v = 0.75_rt * phi0_arr(i, j, k)
                            + 0.25_rt * (phi1_arr(i, j, k) + dtau * Lr);
                     out(i, j, k) = normalized ? amrex::max(-1.0_rt, amrex::min(1.0_rt, v)) : v;
@@ -342,7 +355,7 @@ inline void reinitialize_phi(amrex::MultiFab& phi,
                     int i = iv[0], j = iv[1], k = iv[2];
                     if (wall.masked(i, j, k)) { out(i, j, k) = phi0_arr(i, j, k); return; }
                     Real Lr = detail::reinit_rhs_cell(phi2_arr, phi_in, wall, i, j, k,
-                                                       dx[0], dx[1], h, hinv, L, Linv, grad);
+                                                       dx[0], dx[1], h, hinv, L, Linv, grad, disable_subcell_fix);
                     Real v = (1.0_rt/3.0_rt) * phi0_arr(i, j, k)
                            + (2.0_rt/3.0_rt) * (phi2_arr(i, j, k) + dtau * Lr);
                     out(i, j, k) = normalized ? amrex::max(-1.0_rt, amrex::min(1.0_rt, v)) : v;
@@ -439,9 +452,9 @@ inline void reinitialize_phi(amrex::MultiFab& phi,
                 const Real p0xm = wall.at(phi_in, i, j, k, -1, 0);
                 const Real p0yp = wall.at(phi_in, i, j, k, 0, 1);
                 const Real p0ym = wall.at(phi_in, i, j, k, 0, -1);
-                const bool near_front =
-                    (p0c * p0xp < 0.0_rt) || (p0c * p0xm < 0.0_rt) ||
-                    (p0c * p0yp < 0.0_rt) || (p0c * p0ym < 0.0_rt);
+                const bool near_front = !disable_subcell_fix &&
+                    ((p0c * p0xp < 0.0_rt) || (p0c * p0xm < 0.0_rt) ||
+                     (p0c * p0yp < 0.0_rt) || (p0c * p0ym < 0.0_rt));
 
                 if (near_front) {
                     // Per-axis gradient of phi_0, then D = phi_0 / |g| --
