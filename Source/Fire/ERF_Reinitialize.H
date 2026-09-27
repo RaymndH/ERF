@@ -27,6 +27,110 @@
 
 namespace fire_levelset {
 
+namespace detail {
+
+/**
+ * @brief Per-cell reinitialization RHS, L(phi), such that one forward-Euler
+ * pseudo-time step is phi_new = phi_state + dtau * L(phi_state).
+ *
+ * Factored out of reinitialize_phi() so the same per-cell physics (Sussman
+ * band-normalized update with WRF-Fire's smoothed sign, overridden by the
+ * Russo-Smereka subcell update near the front, both referenced against the
+ * ORIGINAL phi0 passed to the outer call) can be evaluated at each stage of
+ * either forward Euler or TVD RK3 without duplicating the physics.
+ *
+ * @param[in] phi_state  The current pseudo-time iterate (or RK stage) to read
+ *                       derivatives and the cell's own value from.
+ * @param[in] phi_in     The ORIGINAL phi passed to reinitialize_phi(), fixed
+ *                       for the whole call -- source of the near_front test,
+ *                       the exact sign, and the Russo-Smereka distance D.
+ */
+AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+amrex::Real reinit_rhs_cell(amrex::Array4<amrex::Real const> const& phi_state,
+                             amrex::Array4<amrex::Real const> const& phi_in,
+                             const WallStencil& wall,
+                             int i, int j, int k,
+                             amrex::Real dx0, amrex::Real dx1,
+                             amrex::Real h, amrex::Real hinv,
+                             amrex::Real Lval, amrex::Real Linv,
+                             const LevelSetGradient& grad) noexcept
+{
+    using namespace amrex;
+
+    // Mask cells are not part of the distance function -- zero rate leaves
+    // them unchanged by any stage combination (0.75*m + 0.25*(m+dtau*0) = m,
+    // etc.), matching the explicit copy-through the un-refactored code used.
+    if (wall.masked(i, j, k)) { return 0.0_rt; }
+
+    Real dxm, dxp, dym, dyp;
+    one_sided_derivatives(phi_state, dx0, i, j, k, 1, 0, grad, wall, dxm, dxp);
+    one_sided_derivatives(phi_state, dx1, i, j, k, 0, 1, grad, wall, dym, dyp);
+
+    const Real phi0 = phi_in(i, j, k);
+    Real sgn_phi0_hard = (phi0 > 0.0) ? 1.0 :
+                         (phi0 < 0.0) ? -1.0 : 0.0;
+
+    const Real eps_s = h * Linv;
+    Real sgn_phi0_smooth = phi0 / std::sqrt(phi0 * phi0 + eps_s * eps_s);
+
+    Real gx2, gy2;
+    if (sgn_phi0_smooth > 0.0_rt) {
+        Real a = amrex::max(dxm, 0.0_rt), b = amrex::min(dxp, 0.0_rt);
+        gx2 = amrex::max(a * a, b * b);
+        Real c = amrex::max(dym, 0.0_rt), d = amrex::min(dyp, 0.0_rt);
+        gy2 = amrex::max(c * c, d * d);
+    } else {
+        Real a = amrex::min(dxm, 0.0_rt), b = amrex::max(dxp, 0.0_rt);
+        gx2 = amrex::max(a * a, b * b);
+        Real c = amrex::min(dym, 0.0_rt), d = amrex::max(dyp, 0.0_rt);
+        gy2 = amrex::max(c * c, d * d);
+    }
+    Real norm_grad = std::sqrt(gx2 + gy2 + 1.0e-14);
+
+    Real L_rate = sgn_phi0_smooth * (1.0_rt - Lval * norm_grad) * Linv;
+
+    const Real p0c  = phi_in(i, j, k);
+    const Real p0xp = wall.at(phi_in, i, j, k, 1, 0);
+    const Real p0xm = wall.at(phi_in, i, j, k, -1, 0);
+    const Real p0yp = wall.at(phi_in, i, j, k, 0, 1);
+    const Real p0ym = wall.at(phi_in, i, j, k, 0, -1);
+    const bool near_front =
+        (p0c * p0xp < 0.0_rt) || (p0c * p0xm < 0.0_rt) ||
+        (p0c * p0yp < 0.0_rt) || (p0c * p0ym < 0.0_rt);
+
+    if (near_front) {
+        const Real d_xp = (p0xp - p0c) * hinv;
+        const Real d_xm = (p0c - p0xm) * hinv;
+        const Real d_yp = (p0yp - p0c) * hinv;
+        const Real d_ym = (p0c - p0ym) * hinv;
+        const bool cross_xp = (p0c * p0xp < 0.0_rt);
+        const bool cross_xm = (p0c * p0xm < 0.0_rt);
+        const bool cross_yp = (p0c * p0yp < 0.0_rt);
+        const bool cross_ym = (p0c * p0ym < 0.0_rt);
+
+        auto minmod = [](Real a, Real b) {
+            if (a * b <= 0.0_rt) { return 0.0_rt; }
+            return (std::abs(a) < std::abs(b)) ? a : b;
+        };
+        auto axis_grad = [&](bool cp, bool cm, Real dp, Real dm) {
+            if (cp && cm) { return (std::abs(dp) > std::abs(dm)) ? dp : dm; }
+            if (cp) { return dp; }
+            if (cm) { return dm; }
+            return minmod(dm, dp);
+        };
+        const Real gx = axis_grad(cross_xp, cross_xm, d_xp, d_xm);
+        const Real gy = axis_grad(cross_yp, cross_ym, d_yp, d_ym);
+        const Real gnorm = std::sqrt(gx * gx + gy * gy + 1.0e-14_rt);
+        const Real D = p0c / gnorm;
+
+        L_rate = -hinv * (sgn_phi0_hard * std::abs(phi_state(i, j, k)) - D * Linv);
+    }
+
+    return L_rate;
+}
+
+} // namespace detail
+
 /**
  * @brief Reinitialize φ to a normalized signed-distance function
  *
@@ -34,7 +138,23 @@ namespace fire_levelset {
  *
  *   ∂φ/∂τ = S(φ₀) * (1 - L |∇φ|) / L
  *
- * by explicit Euler in pseudo-time, where S(φ₀) = φ₀/sqrt(φ₀²+eps²) is the
+ * by explicit Euler in pseudo-time (default) or, if `tvd_rk3` is set, by the
+ * 3-stage SSP/TVD Runge-Kutta scheme Jiang & Peng (2000) use for this same
+ * equation (their eqs. (3.10)-(3.12) sketch it for the pure Godunov RHS; here
+ * the same Shu-Osher time integrator is applied to ERF's actual RHS, i.e.
+ * WITH the smoothed-sign Sussman forcing and the Russo-Smereka near-front
+ * override, not the textbook RHS in isolation):
+ *
+ *   phi1 = phi0 + dtau L(phi0)
+ *   phi2 = 3/4 phi0 + 1/4 (phi1 + dtau L(phi1))
+ *   phi3 = 1/3 phi0 + 2/3 (phi2 + dtau L(phi2))
+ *
+ * where phi0 is the state at the start of the pseudo-time step (one call is
+ * n_iters such steps) and L is factored out in fire_levelset::detail::
+ * reinit_rhs_cell(). Each RK stage is clamped exactly like each Euler
+ * iteration was (see below).
+ *
+ * S(φ₀) = φ₀/sqrt(φ₀²+eps²) is the
  * WRF-Fire-style smoothed sign (module_fr_fire_core.F's reinit_ls_rk3), not
  * the exact ±1 sign -- it tapers the forcing continuously to zero across the
  * front instead of switching at a single point. The fixed point is
@@ -96,6 +216,12 @@ namespace fire_levelset {
  *                         which is expected to be at least as unstable -- it
  *                         exists to confirm/quantify that failure mode, not as
  *                         a candidate fix.
+ * @param[in]     tvd_rk3  Default false = forward Euler (current, confirmed
+ *                         behavior, bit-for-bit unchanged). true replaces each
+ *                         pseudo-time iteration with a 3-stage SSP/TVD RK3
+ *                         step (Jiang & Peng's recommended time integrator for
+ *                         this equation) using the SAME per-cell RHS -- see
+ *                         the file doc comment above.
  */
 inline void reinitialize_phi(amrex::MultiFab& phi,
                               const amrex::Geometry& geom,
@@ -106,7 +232,8 @@ inline void reinitialize_phi(amrex::MultiFab& phi,
                               const amrex::MultiFab* mask = nullptr,
                               bool wall_extrap = false,
                               const LevelSetGradient& grad = LevelSetGradient{},
-                              bool skip_final_clamp = false)
+                              bool skip_final_clamp = false,
+                              bool tvd_rk3 = false)
 {
     using namespace amrex;
 
@@ -144,9 +271,87 @@ inline void reinitialize_phi(amrex::MultiFab& phi,
     // indeterminate makes the run depend on whatever the allocator hands over.
     phi_next.setVal(0.0);
 
+    // Second stage buffer, used only by the tvd_rk3 path (phi2 of the
+    // 3-stage step; phi1 reuses phi_next, phi3 is written back into phi_next
+    // once phi1's contents are no longer needed -- see below). Always
+    // allocated for simplicity; the cost is negligible next to phi_work/
+    // phi_next above and this keeps the euler path's allocations identical
+    // to before this change.
+    MultiFab phi_stage2(phi.boxArray(), phi.DistributionMap(), 1, 3);
+    if (tvd_rk3) { phi_stage2.setVal(0.0); }
+
     for (int iter = 0; iter < n_iters; ++iter) {
         // Fill boundary ghosts
         fire_fill_boundary(phi_work, geom);
+
+        if (tvd_rk3) {
+            // 3-stage SSP/TVD RK3 pseudo-time step -- see file doc comment.
+            // phi0 = phi_work (fixed reference for this step, read but not
+            // written until the very end).
+
+            // Stage 1: phi1 = phi0 + dtau*L(phi0), into phi_next.
+            for (MFIter mfi(phi_work); mfi.isValid(); ++mfi) {
+                const Box& bx = mfi.validbox();
+                auto phi0_arr = phi_work.const_array(mfi);
+                auto phi_in   = phi.const_array(mfi);
+                auto out      = phi_next.array(mfi);
+                const WallStencil wall = make_wall_stencil(mask, wall_extrap, mfi);
+                ParallelFor(bx, [=] AMREX_GPU_DEVICE (const IntVect& iv) noexcept {
+                    int i = iv[0], j = iv[1], k = iv[2];
+                    if (wall.masked(i, j, k)) { out(i, j, k) = phi0_arr(i, j, k); return; }
+                    Real Lr = detail::reinit_rhs_cell(phi0_arr, phi_in, wall, i, j, k,
+                                                       dx[0], dx[1], h, hinv, L, Linv, grad);
+                    Real v = phi0_arr(i, j, k) + dtau * Lr;
+                    out(i, j, k) = normalized ? amrex::max(-1.0_rt, amrex::min(1.0_rt, v)) : v;
+                });
+            }
+            fire_fill_boundary(phi_next, geom);
+
+            // Stage 2: phi2 = 3/4 phi0 + 1/4 (phi1 + dtau*L(phi1)), into phi_stage2.
+            for (MFIter mfi(phi_work); mfi.isValid(); ++mfi) {
+                const Box& bx = mfi.validbox();
+                auto phi0_arr = phi_work.const_array(mfi);
+                auto phi1_arr = phi_next.const_array(mfi);
+                auto phi_in   = phi.const_array(mfi);
+                auto out      = phi_stage2.array(mfi);
+                const WallStencil wall = make_wall_stencil(mask, wall_extrap, mfi);
+                ParallelFor(bx, [=] AMREX_GPU_DEVICE (const IntVect& iv) noexcept {
+                    int i = iv[0], j = iv[1], k = iv[2];
+                    if (wall.masked(i, j, k)) { out(i, j, k) = phi0_arr(i, j, k); return; }
+                    Real Lr = detail::reinit_rhs_cell(phi1_arr, phi_in, wall, i, j, k,
+                                                       dx[0], dx[1], h, hinv, L, Linv, grad);
+                    Real v = 0.75_rt * phi0_arr(i, j, k)
+                           + 0.25_rt * (phi1_arr(i, j, k) + dtau * Lr);
+                    out(i, j, k) = normalized ? amrex::max(-1.0_rt, amrex::min(1.0_rt, v)) : v;
+                });
+            }
+            fire_fill_boundary(phi_stage2, geom);
+
+            // Stage 3: phi3 = 1/3 phi0 + 2/3 (phi2 + dtau*L(phi2)), written
+            // into phi_next -- phi1's contents there are no longer needed,
+            // and this does not alias phi_work (phi0) or phi_stage2 (phi2),
+            // which are only read in this pass.
+            for (MFIter mfi(phi_work); mfi.isValid(); ++mfi) {
+                const Box& bx = mfi.validbox();
+                auto phi0_arr = phi_work.const_array(mfi);
+                auto phi2_arr = phi_stage2.const_array(mfi);
+                auto phi_in   = phi.const_array(mfi);
+                auto out      = phi_next.array(mfi);
+                const WallStencil wall = make_wall_stencil(mask, wall_extrap, mfi);
+                ParallelFor(bx, [=] AMREX_GPU_DEVICE (const IntVect& iv) noexcept {
+                    int i = iv[0], j = iv[1], k = iv[2];
+                    if (wall.masked(i, j, k)) { out(i, j, k) = phi0_arr(i, j, k); return; }
+                    Real Lr = detail::reinit_rhs_cell(phi2_arr, phi_in, wall, i, j, k,
+                                                       dx[0], dx[1], h, hinv, L, Linv, grad);
+                    Real v = (1.0_rt/3.0_rt) * phi0_arr(i, j, k)
+                           + (2.0_rt/3.0_rt) * (phi2_arr(i, j, k) + dtau * Lr);
+                    out(i, j, k) = normalized ? amrex::max(-1.0_rt, amrex::min(1.0_rt, v)) : v;
+                });
+            }
+
+            MultiFab::Copy(phi_work, phi_next, 0, 0, 1, 0);
+            continue;
+        }
 
         // Update RHS via Sussman reinitialization
         for (MFIter mfi(phi_work); mfi.isValid(); ++mfi) {
