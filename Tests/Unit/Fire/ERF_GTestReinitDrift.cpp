@@ -304,14 +304,14 @@ DriftResult measure (const MultiFab& phi, const MultiFab& phi_exact0,
 template <class Shape>
 void run_matrix (const Shape& shape, const char* shape_name, Grid& g,
                   bool skip_clamp, int iters,
-                  std::vector<std::tuple<std::string,int,int,bool,DriftResult>>& all_results)
+                  std::vector<std::tuple<std::string,int,int,bool,DriftResult>>& all_results,
+                  Real dtau = 0.25 * DX)   // default: ERF_FireLayer.cpp's auto default
 {
     MultiFab phi(g.ba, g.dm, 1, 3), phi0(g.ba, g.dm, 1, 3);
     fill_phi(phi,  shape);
     fill_phi(phi0, shape);
     fire_fill_boundary(phi, g.geom);
 
-    const Real dtau = 0.25 * DX;   // ERF_FireLayer.cpp's auto default
     const Real area0 = burned_cells(phi) * DX * DX;
     const Real sub_area0 = signed_area_from_phi(phi);
 
@@ -418,6 +418,30 @@ TEST(ReinitDrift, StaticFrontDisplacement)
                 EXPECT_LT(std::abs(r.mean_disp_dx), std::abs(r2.mean_disp_dx))
                     << name << ": clamp should strongly suppress the convex-retreat erosion pathway";
                 break;
+            }
+        }
+    }
+}
+
+/// Follow-up (2026-09-26) to the WRF-reference comparison: does ERF's OWN
+/// scheme (Russo-Smereka subcell fix + smoothed-sign Sussman, unchanged)
+/// stop compounding with N once dtau is set to WRF's much smaller value
+/// (0.01*dx instead of ERF's default 0.25*dx, 25x smaller), isolating
+/// whether dtau magnitude alone explains why WRF's algorithm (same
+/// curvature-bias mechanism per ERF_WrfReinitReference.H, but ~15x smaller
+/// and flat vs N) doesn't compound the way ERF's default does.
+TEST(ReinitDrift, CurvedFrontCreepWithWrfDtau)
+{
+    Grid g;
+    std::vector<std::tuple<std::string,int,int,bool,DriftResult>> results;
+    const Real wrf_dtau = 0.01 * DX;
+
+    for (bool convex : {true, false}) {
+        CircleShape shape(1000.0, convex);
+        const char* name = convex ? "circle_convex_R1000_dtau01" : "circle_concave_R1000_dtau01";
+        for (bool skip_clamp : {false, true}) {
+            for (int iters : {1, 10}) {
+                run_matrix(shape, name, g, skip_clamp, iters, results, wrf_dtau);
             }
         }
     }
