@@ -266,6 +266,37 @@ amrex::Real reinit_rhs_cell(amrex::Array4<amrex::Real const> const& phi_state,
  *                         (which has no subcell fix at all) does not show
  *                         at matched dtau. See CLAUDE.md's 2026-09-26
  *                         addendum for the test this was built for.
+ * @param[in]     wrf_style_upwind  Diagnostic only (default false = current,
+ *                         confirmed behavior). true selects the general
+ *                         branch's Godunov upwind side PER AXIS by
+ *                         sign(S(phi0) * 4th-order-central-diff) -- WRF's
+ *                         own rule (module_fr_fire_core.F's advance_ls_reinit)
+ *                         -- instead of ERF's single sign(S(phi0)) selection
+ *                         for both axes. WARNING: tested unstable when
+ *                         combined with ERF's own HJ-WENO5-Z reconstruction
+ *                         (not WRF's own paired flux-form WENO5) -- the two
+ *                         are not independently swappable. See CLAUDE.md's
+ *                         2026-09-26 addendum.
+ * @param[in]     exact_interface_freeze  Diagnostic/candidate fix (default
+ *                         false = current, confirmed behavior). true changes
+ *                         the Russo-Smereka near-front cell update from an
+ *                         iterative relaxation toward the target subcell
+ *                         distance (phi_arr - dtau/h*(sign*|phi_arr| - D),
+ *                         converging geometrically over repeated iterations)
+ *                         to a DIRECT assignment to that exact target
+ *                         (sign*D), which depends only on phi0 (fixed for
+ *                         the whole call) and is therefore immediately
+ *                         exact and provably invariant across iterations
+ *                         and repeated calls -- an exact, by-construction
+ *                         interface-preservation guarantee, per Sussman &
+ *                         Fatemi (1999, SIAM J. Sci. Comput. 20(4),
+ *                         1165-1191), rather than the approximate
+ *                         suppression an added constraint term (Hartmann
+ *                         et al. 2008) would give. Only implemented in the
+ *                         forward-Euler path (tvd_rk3=false); has no effect
+ *                         if disable_subcell_fix=true (nothing to freeze).
+ *                         See CLAUDE.md's 2026-09-26 addendum for the test
+ *                         this was built for.
  */
 inline void reinitialize_phi(amrex::MultiFab& phi,
                               const amrex::Geometry& geom,
@@ -279,7 +310,8 @@ inline void reinitialize_phi(amrex::MultiFab& phi,
                               bool skip_final_clamp = false,
                               bool tvd_rk3 = false,
                               bool disable_subcell_fix = false,
-                              bool wrf_style_upwind = false)
+                              bool wrf_style_upwind = false,
+                              bool exact_interface_freeze = false)
 {
     using namespace amrex;
 
@@ -575,8 +607,10 @@ inline void reinitialize_phi(amrex::MultiFab& phi,
                     const Real gnorm = std::sqrt(gx * gx + gy * gy + 1.0e-14_rt);
                     const Real D = p0c / gnorm;
 
-                    phi_new = phi_arr(i, j, k)
-                            - dtau * hinv * (sgn_phi0_hard * std::abs(phi_arr(i, j, k)) - D * Linv);
+                    phi_new = exact_interface_freeze
+                        ? sgn_phi0_hard * D * Linv
+                        : phi_arr(i, j, k)
+                              - dtau * hinv * (sgn_phi0_hard * std::abs(phi_arr(i, j, k)) - D * Linv);
                 }
 
                 // Clamp only in normalized mode, where it pins the far field:

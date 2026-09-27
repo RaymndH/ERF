@@ -307,7 +307,8 @@ void run_matrix (const Shape& shape, const char* shape_name, Grid& g,
                   std::vector<std::tuple<std::string,int,int,bool,DriftResult>>& all_results,
                   Real dtau = 0.25 * DX,   // default: ERF_FireLayer.cpp's auto default
                   bool disable_subcell_fix = false,
-                  bool wrf_style_upwind = false)
+                  bool wrf_style_upwind = false,
+                  bool exact_interface_freeze = false)
 {
     MultiFab phi(g.ba, g.dm, 1, 3), phi0(g.ba, g.dm, 1, 3);
     fill_phi(phi,  shape);
@@ -324,7 +325,8 @@ void run_matrix (const Shape& shape, const char* shape_name, Grid& g,
         for (int c = 0; c < n_calls; ++c) {
             reinitialize_phi(phi, g.geom, iters, dtau, -1.0, /*normalized=*/false,
                               nullptr, false, LevelSetGradient{}, skip_clamp,
-                              /*tvd_rk3=*/false, disable_subcell_fix, wrf_style_upwind);
+                              /*tvd_rk3=*/false, disable_subcell_fix, wrf_style_upwind,
+                              exact_interface_freeze);
             fire_fill_boundary(phi, g.geom);
         }
         done = cp;
@@ -496,6 +498,38 @@ TEST(ReinitDrift, CurvedFrontCreepWrfStyleUpwind)
             for (int iters : {1, 10}) {
                 run_matrix(shape, name, g, skip_clamp, iters, results, wrf_dtau,
                            /*disable_subcell_fix=*/true, /*wrf_style_upwind=*/true);
+            }
+        }
+    }
+}
+
+/// Candidate FIX (2026-09-26): Sussman & Fatemi (1999)-style exact
+/// interface freeze. Changes the Russo-Smereka near-front update from an
+/// iterative relaxation toward the target subcell distance to a direct
+/// assignment to that (already-exact, phi0-derived) target -- immediately
+/// invariant across iterations and calls, by construction, not just
+/// suppressed. Tested at BOTH the campaign's default dtau (0.25*dx) and
+/// WRF's much smaller dtau (0.01*dx), subcell fix ON (required -- nothing
+/// to freeze without it), to see whether this flattens the growth the way
+/// WRF's reference implementation already is, at either/both settings.
+TEST(ReinitDrift, CurvedFrontCreepExactInterfaceFreeze)
+{
+    Grid g;
+    std::vector<std::tuple<std::string,int,int,bool,DriftResult>> results;
+
+    for (Real dtau_val : {0.25 * DX, 0.01 * DX}) {
+        const char* dtau_tag = (dtau_val == Real(0.25 * DX)) ? "dtau025" : "dtau001";
+        for (bool convex : {true, false}) {
+            CircleShape shape(1000.0, convex);
+            char name[80];
+            std::snprintf(name, sizeof(name), "circle_%s_R1000_exactfreeze_%s",
+                          convex ? "convex" : "concave", dtau_tag);
+            for (bool skip_clamp : {false, true}) {
+                for (int iters : {1, 10}) {
+                    run_matrix(shape, name, g, skip_clamp, iters, results, dtau_val,
+                               /*disable_subcell_fix=*/false, /*wrf_style_upwind=*/false,
+                               /*exact_interface_freeze=*/true);
+                }
             }
         }
     }
