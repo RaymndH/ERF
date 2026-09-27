@@ -54,7 +54,8 @@ amrex::Real reinit_rhs_cell(amrex::Array4<amrex::Real const> const& phi_state,
                              amrex::Real h, amrex::Real hinv,
                              amrex::Real Lval, amrex::Real Linv,
                              const LevelSetGradient& grad,
-                             bool disable_subcell_fix = false) noexcept
+                             bool disable_subcell_fix = false,
+                             bool wrf_style_upwind = false) noexcept
 {
     using namespace amrex;
 
@@ -75,7 +76,38 @@ amrex::Real reinit_rhs_cell(amrex::Array4<amrex::Real const> const& phi_state,
     Real sgn_phi0_smooth = phi0 / std::sqrt(phi0 * phi0 + eps_s * eps_s);
 
     Real gx2, gy2;
-    if (sgn_phi0_smooth > 0.0_rt) {
+    if (wrf_style_upwind) {
+        // WRF's own upwind rule (module_fr_fire_core.F's advance_ls_reinit):
+        // select the branch PER AXIS by sign(S(phi0) * D4th_axis), where
+        // D4th is a 4th-order CENTRAL difference of the current iterate --
+        // not ERF's rule above, which selects the SAME branch for both axes
+        // from sign(S(phi0)) alone, with no gradient information at all.
+        auto d4 = [&](int di, int dj, Real dsp) {
+            const Real p_im2 = wall.at(phi_state, i, j, k, -2*di, -2*dj);
+            const Real p_im1 = wall.at(phi_state, i, j, k, -di, -dj);
+            const Real p_i   = phi_state(i, j, k);
+            const Real p_ip1 = wall.at(phi_state, i, j, k, di, dj);
+            const Real p_ip2 = wall.at(phi_state, i, j, k, 2*di, 2*dj);
+            return (7.0_rt*(p_ip1+p_i) - p_ip2 - p_im1) / (12.0_rt*dsp)
+                 - (7.0_rt*(p_i+p_im1) - p_ip1 - p_im2) / (12.0_rt*dsp);
+        };
+        const Real ufx = sgn_phi0_smooth * d4(1, 0, dx0);
+        const Real ufy = sgn_phi0_smooth * d4(0, 1, dx1);
+        if (ufx >= 0.0_rt) {
+            Real a = amrex::max(dxm, 0.0_rt), b = amrex::min(dxp, 0.0_rt);
+            gx2 = amrex::max(a * a, b * b);
+        } else {
+            Real a = amrex::min(dxm, 0.0_rt), b = amrex::max(dxp, 0.0_rt);
+            gx2 = amrex::max(a * a, b * b);
+        }
+        if (ufy >= 0.0_rt) {
+            Real c = amrex::max(dym, 0.0_rt), d = amrex::min(dyp, 0.0_rt);
+            gy2 = amrex::max(c * c, d * d);
+        } else {
+            Real c = amrex::min(dym, 0.0_rt), d = amrex::max(dyp, 0.0_rt);
+            gy2 = amrex::max(c * c, d * d);
+        }
+    } else if (sgn_phi0_smooth > 0.0_rt) {
         Real a = amrex::max(dxm, 0.0_rt), b = amrex::min(dxp, 0.0_rt);
         gx2 = amrex::max(a * a, b * b);
         Real c = amrex::max(dym, 0.0_rt), d = amrex::min(dyp, 0.0_rt);
@@ -246,7 +278,8 @@ inline void reinitialize_phi(amrex::MultiFab& phi,
                               const LevelSetGradient& grad = LevelSetGradient{},
                               bool skip_final_clamp = false,
                               bool tvd_rk3 = false,
-                              bool disable_subcell_fix = false)
+                              bool disable_subcell_fix = false,
+                              bool wrf_style_upwind = false)
 {
     using namespace amrex;
 
@@ -313,7 +346,7 @@ inline void reinitialize_phi(amrex::MultiFab& phi,
                     int i = iv[0], j = iv[1], k = iv[2];
                     if (wall.masked(i, j, k)) { out(i, j, k) = phi0_arr(i, j, k); return; }
                     Real Lr = detail::reinit_rhs_cell(phi0_arr, phi_in, wall, i, j, k,
-                                                       dx[0], dx[1], h, hinv, L, Linv, grad, disable_subcell_fix);
+                                                       dx[0], dx[1], h, hinv, L, Linv, grad, disable_subcell_fix, wrf_style_upwind);
                     Real v = phi0_arr(i, j, k) + dtau * Lr;
                     out(i, j, k) = normalized ? amrex::max(-1.0_rt, amrex::min(1.0_rt, v)) : v;
                 });
@@ -332,7 +365,7 @@ inline void reinitialize_phi(amrex::MultiFab& phi,
                     int i = iv[0], j = iv[1], k = iv[2];
                     if (wall.masked(i, j, k)) { out(i, j, k) = phi0_arr(i, j, k); return; }
                     Real Lr = detail::reinit_rhs_cell(phi1_arr, phi_in, wall, i, j, k,
-                                                       dx[0], dx[1], h, hinv, L, Linv, grad, disable_subcell_fix);
+                                                       dx[0], dx[1], h, hinv, L, Linv, grad, disable_subcell_fix, wrf_style_upwind);
                     Real v = 0.75_rt * phi0_arr(i, j, k)
                            + 0.25_rt * (phi1_arr(i, j, k) + dtau * Lr);
                     out(i, j, k) = normalized ? amrex::max(-1.0_rt, amrex::min(1.0_rt, v)) : v;
@@ -355,7 +388,7 @@ inline void reinitialize_phi(amrex::MultiFab& phi,
                     int i = iv[0], j = iv[1], k = iv[2];
                     if (wall.masked(i, j, k)) { out(i, j, k) = phi0_arr(i, j, k); return; }
                     Real Lr = detail::reinit_rhs_cell(phi2_arr, phi_in, wall, i, j, k,
-                                                       dx[0], dx[1], h, hinv, L, Linv, grad, disable_subcell_fix);
+                                                       dx[0], dx[1], h, hinv, L, Linv, grad, disable_subcell_fix, wrf_style_upwind);
                     Real v = (1.0_rt/3.0_rt) * phi0_arr(i, j, k)
                            + (2.0_rt/3.0_rt) * (phi2_arr(i, j, k) + dtau * Lr);
                     out(i, j, k) = normalized ? amrex::max(-1.0_rt, amrex::min(1.0_rt, v)) : v;
@@ -417,7 +450,39 @@ inline void reinitialize_phi(amrex::MultiFab& phi,
                 // extrema, which showed up as the front flooding the domain once
                 // enough pseudo-time iterations were taken.
                 Real gx2, gy2;
-                if (sgn_phi0_smooth > 0.0_rt) {
+                if (wrf_style_upwind) {
+                    // WRF's own upwind rule (module_fr_fire_core.F's
+                    // advance_ls_reinit): select the branch PER AXIS by
+                    // sign(S(phi0) * D4th_axis), a 4th-order central
+                    // difference of the current iterate -- not ERF's rule
+                    // above, which selects the SAME branch for both axes
+                    // from sign(S(phi0)) alone, with no gradient information.
+                    auto d4 = [&](int di, int dj, Real dsp) {
+                        const Real p_im2 = wall.at(phi_arr, i, j, k, -2*di, -2*dj);
+                        const Real p_im1 = wall.at(phi_arr, i, j, k, -di, -dj);
+                        const Real p_i   = phi_arr(i, j, k);
+                        const Real p_ip1 = wall.at(phi_arr, i, j, k, di, dj);
+                        const Real p_ip2 = wall.at(phi_arr, i, j, k, 2*di, 2*dj);
+                        return (7.0_rt*(p_ip1+p_i) - p_ip2 - p_im1) / (12.0_rt*dsp)
+                             - (7.0_rt*(p_i+p_im1) - p_ip1 - p_im2) / (12.0_rt*dsp);
+                    };
+                    const Real ufx = sgn_phi0_smooth * d4(1, 0, dx[0]);
+                    const Real ufy = sgn_phi0_smooth * d4(0, 1, dx[1]);
+                    if (ufx >= 0.0_rt) {
+                        Real a = amrex::max(dxm, 0.0_rt), b = amrex::min(dxp, 0.0_rt);
+                        gx2 = amrex::max(a * a, b * b);
+                    } else {
+                        Real a = amrex::min(dxm, 0.0_rt), b = amrex::max(dxp, 0.0_rt);
+                        gx2 = amrex::max(a * a, b * b);
+                    }
+                    if (ufy >= 0.0_rt) {
+                        Real c = amrex::max(dym, 0.0_rt), d = amrex::min(dyp, 0.0_rt);
+                        gy2 = amrex::max(c * c, d * d);
+                    } else {
+                        Real c = amrex::min(dym, 0.0_rt), d = amrex::max(dyp, 0.0_rt);
+                        gy2 = amrex::max(c * c, d * d);
+                    }
+                } else if (sgn_phi0_smooth > 0.0_rt) {
                     Real a = amrex::max(dxm, 0.0_rt), b = amrex::min(dxp, 0.0_rt);
                     gx2 = amrex::max(a * a, b * b);
                     Real c = amrex::max(dym, 0.0_rt), d = amrex::min(dyp, 0.0_rt);

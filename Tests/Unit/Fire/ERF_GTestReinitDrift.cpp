@@ -306,7 +306,8 @@ void run_matrix (const Shape& shape, const char* shape_name, Grid& g,
                   bool skip_clamp, int iters,
                   std::vector<std::tuple<std::string,int,int,bool,DriftResult>>& all_results,
                   Real dtau = 0.25 * DX,   // default: ERF_FireLayer.cpp's auto default
-                  bool disable_subcell_fix = false)
+                  bool disable_subcell_fix = false,
+                  bool wrf_style_upwind = false)
 {
     MultiFab phi(g.ba, g.dm, 1, 3), phi0(g.ba, g.dm, 1, 3);
     fill_phi(phi,  shape);
@@ -323,7 +324,7 @@ void run_matrix (const Shape& shape, const char* shape_name, Grid& g,
         for (int c = 0; c < n_calls; ++c) {
             reinitialize_phi(phi, g.geom, iters, dtau, -1.0, /*normalized=*/false,
                               nullptr, false, LevelSetGradient{}, skip_clamp,
-                              /*tvd_rk3=*/false, disable_subcell_fix);
+                              /*tvd_rk3=*/false, disable_subcell_fix, wrf_style_upwind);
             fire_fill_boundary(phi, g.geom);
         }
         done = cp;
@@ -470,6 +471,31 @@ TEST(ReinitDrift, CurvedFrontCreepSubcellFixDisabled)
             for (int iters : {1, 10}) {
                 run_matrix(shape, name, g, skip_clamp, iters, results, wrf_dtau,
                            /*disable_subcell_fix=*/true);
+            }
+        }
+    }
+}
+
+/// Follow-up to CurvedFrontCreepSubcellFixDisabled: the subcell fix was
+/// refuted as the sole cause (disabling it made iters=10 growth WORSE, not
+/// better). This tests the other identified difference: ERF's Godunov
+/// branch selects the SAME side for both axes from sign(S(phi0)) alone
+/// (no gradient information at all), while WRF's selects PER AXIS from
+/// sign(S(phi0) * 4th-order-central-diff) -- still with the subcell fix
+/// disabled and dtau matched to WRF's value, isolating just this one piece.
+TEST(ReinitDrift, CurvedFrontCreepWrfStyleUpwind)
+{
+    Grid g;
+    std::vector<std::tuple<std::string,int,int,bool,DriftResult>> results;
+    const Real wrf_dtau = 0.01 * DX;
+
+    for (bool convex : {true, false}) {
+        CircleShape shape(1000.0, convex);
+        const char* name = convex ? "circle_convex_R1000_wrfupwind" : "circle_concave_R1000_wrfupwind";
+        for (bool skip_clamp : {false, true}) {
+            for (int iters : {1, 10}) {
+                run_matrix(shape, name, g, skip_clamp, iters, results, wrf_dtau,
+                           /*disable_subcell_fix=*/true, /*wrf_style_upwind=*/true);
             }
         }
     }
