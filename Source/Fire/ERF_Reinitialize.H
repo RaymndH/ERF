@@ -337,6 +337,98 @@ inline void reinitialize_phi(amrex::MultiFab& phi,
     MultiFab phi_work(phi.boxArray(), phi.DistributionMap(), 1, 3);
     phi_work.ParallelCopy(phi);
 
+    // exact_interface_freeze precompute: D depends only on phi0 (fixed for
+    // the whole call), so compute it once here rather than every iteration,
+    // and -- Option A from the 2026-09-26 "workshop solutions" discussion --
+    // smooth it once across same-sign near-front neighbours before freezing,
+    // rather than committing each cell's independently-computed D (which can
+    // disagree with its neighbours, worst at high-curvature points like the
+    // ignition-line end corners) immediately and permanently. This fill uses
+    // phi_work (already an exact copy of phi at this point, before any
+    // iteration mutates it) rather than the `phi` argument directly, so a
+    // 2-ring neighbour-of-neighbour stencil (needed to test whether a
+    // NEIGHBOUR is itself near-front) has properly filled ghosts to read,
+    // regardless of how many ghost cells the caller's `phi` itself carries.
+    MultiFab freeze_target;
+    if (exact_interface_freeze) {
+        fire_fill_boundary(phi_work, geom);
+
+        MultiFab freeze_raw(phi.boxArray(), phi.DistributionMap(), 1, 3);
+        for (MFIter mfi(phi_work); mfi.isValid(); ++mfi) {
+            const Box& bx = mfi.validbox();
+            auto phi0_arr = phi_work.const_array(mfi);
+            auto out = freeze_raw.array(mfi);
+            const WallStencil wall = make_wall_stencil(mask, wall_extrap, mfi);
+            ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+                const Real p0c = phi0_arr(i, j, k);
+                const Real p0xp = wall.at(phi0_arr, i, j, k, 1, 0);
+                const Real p0xm = wall.at(phi0_arr, i, j, k, -1, 0);
+                const Real p0yp = wall.at(phi0_arr, i, j, k, 0, 1);
+                const Real p0ym = wall.at(phi0_arr, i, j, k, 0, -1);
+                const bool nf = (p0c*p0xp<0.0_rt) || (p0c*p0xm<0.0_rt) ||
+                                (p0c*p0yp<0.0_rt) || (p0c*p0ym<0.0_rt);
+                if (!nf) { out(i, j, k) = p0c; return; }
+                const Real sgn_hard = (p0c>0.0_rt) ? 1.0_rt : (p0c<0.0_rt) ? -1.0_rt : 0.0_rt;
+                const Real d_xp = (p0xp-p0c)*hinv, d_xm = (p0c-p0xm)*hinv;
+                const Real d_yp = (p0yp-p0c)*hinv, d_ym = (p0c-p0ym)*hinv;
+                const bool cxp = (p0c*p0xp<0.0_rt), cxm = (p0c*p0xm<0.0_rt);
+                const bool cyp = (p0c*p0yp<0.0_rt), cym = (p0c*p0ym<0.0_rt);
+                auto minmod = [](Real a, Real b) {
+                    if (a*b <= 0.0_rt) { return 0.0_rt; }
+                    return (std::abs(a) < std::abs(b)) ? a : b;
+                };
+                auto axis_grad = [&](bool cp, bool cm, Real dp, Real dm) {
+                    if (cp && cm) { return (std::abs(dp) > std::abs(dm)) ? dp : dm; }
+                    if (cp) { return dp; }
+                    if (cm) { return dm; }
+                    return minmod(dm, dp);
+                };
+                const Real gx = axis_grad(cxp, cxm, d_xp, d_xm);
+                const Real gy = axis_grad(cyp, cym, d_yp, d_ym);
+                const Real gnorm = std::sqrt(gx*gx + gy*gy + 1.0e-14_rt);
+                out(i, j, k) = sgn_hard * (p0c / gnorm) * Linv;
+            });
+        }
+        fire_fill_boundary(freeze_raw, geom);
+
+        freeze_target.define(phi.boxArray(), phi.DistributionMap(), 1, 3);
+        for (MFIter mfi(phi_work); mfi.isValid(); ++mfi) {
+            const Box& bx = mfi.validbox();
+            auto phi0_arr = phi_work.const_array(mfi);
+            auto raw = freeze_raw.const_array(mfi);
+            auto out = freeze_target.array(mfi);
+            const WallStencil wall = make_wall_stencil(mask, wall_extrap, mfi);
+            ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+                auto is_near_front = [=] (int ii, int jj) {
+                    const Real c  = phi0_arr(ii, jj, k);
+                    const Real xp = wall.at(phi0_arr, ii, jj, k, 1, 0);
+                    const Real xm = wall.at(phi0_arr, ii, jj, k, -1, 0);
+                    const Real yp = wall.at(phi0_arr, ii, jj, k, 0, 1);
+                    const Real ym = wall.at(phi0_arr, ii, jj, k, 0, -1);
+                    return (c*xp<0.0_rt) || (c*xm<0.0_rt) || (c*yp<0.0_rt) || (c*ym<0.0_rt);
+                };
+                const Real p0c = phi0_arr(i, j, k);
+                if (!is_near_front(i, j)) { out(i, j, k) = raw(i, j, k); return; }
+                const Real sgn_c = (p0c>0.0_rt) ? 1.0_rt : (p0c<0.0_rt) ? -1.0_rt : 0.0_rt;
+                Real sum = raw(i, j, k);
+                int n = 1;
+                constexpr int NB = 4;
+                const int di[NB] = {1, -1, 0, 0};
+                const int dj[NB] = {0, 0, 1, -1};
+                for (int s = 0; s < NB; ++s) {
+                    const Real pn = wall.at(phi0_arr, i, j, k, di[s], dj[s]);
+                    const Real sgn_n = (pn>0.0_rt) ? 1.0_rt : (pn<0.0_rt) ? -1.0_rt : 0.0_rt;
+                    if (sgn_n == sgn_c && is_near_front(i+di[s], j+dj[s])) {
+                        sum += wall.at(raw, i, j, k, di[s], dj[s]);
+                        ++n;
+                    }
+                }
+                out(i, j, k) = sum / Real(n);
+            });
+        }
+        fire_fill_boundary(freeze_target, geom);
+    }
+
     // Jacobi scratch. The update below reads phi_work at i±1 / j±1 while writing
     // the centre cell, so writing back into phi_work in place would be a
     // read-write race between neighbouring GPU threads -- each cell would see
@@ -438,6 +530,12 @@ inline void reinitialize_phi(amrex::MultiFab& phi,
             auto phi_out = phi_next.array(mfi);
             auto phi_in  = phi.const_array(mfi);
             const WallStencil wall = make_wall_stencil(mask, wall_extrap, mfi);
+            // Only bound (and only ever read) when exact_interface_freeze is
+            // true -- freeze_target is left undefined otherwise, and this
+            // ternary's false branch is never evaluated in that case, so
+            // .const_array(mfi) is never called on the undefined MultiFab.
+            Array4<Real const> freeze_target_arr = exact_interface_freeze
+                ? freeze_target.const_array(mfi) : Array4<Real const>{};
 
             ParallelFor(bx, [=] AMREX_GPU_DEVICE (const IntVect& iv) noexcept {
                 int i = iv[0], j = iv[1], k = iv[2];
@@ -602,15 +700,21 @@ inline void reinitialize_phi(amrex::MultiFab& phi,
                         if (cm) { return dm; }
                         return minmod(dm, dp);
                     };
-                    const Real gx = axis_grad(cross_xp, cross_xm, d_xp, d_xm);
-                    const Real gy = axis_grad(cross_yp, cross_ym, d_yp, d_ym);
-                    const Real gnorm = std::sqrt(gx * gx + gy * gy + 1.0e-14_rt);
-                    const Real D = p0c / gnorm;
-
-                    phi_new = exact_interface_freeze
-                        ? sgn_phi0_hard * D * Linv
-                        : phi_arr(i, j, k)
-                              - dtau * hinv * (sgn_phi0_hard * std::abs(phi_arr(i, j, k)) - D * Linv);
+                    if (exact_interface_freeze) {
+                        // D (and its sign-preserving smoothing across
+                        // same-sign near-front neighbours, Option A from the
+                        // 2026-09-26 workshop) was already computed once,
+                        // before the iteration loop, from the fixed phi0 --
+                        // just read the frozen target here.
+                        phi_new = freeze_target_arr(i, j, k);
+                    } else {
+                        const Real gx = axis_grad(cross_xp, cross_xm, d_xp, d_xm);
+                        const Real gy = axis_grad(cross_yp, cross_ym, d_yp, d_ym);
+                        const Real gnorm = std::sqrt(gx * gx + gy * gy + 1.0e-14_rt);
+                        const Real D = p0c / gnorm;
+                        phi_new = phi_arr(i, j, k)
+                            - dtau * hinv * (sgn_phi0_hard * std::abs(phi_arr(i, j, k)) - D * Linv);
+                    }
                 }
 
                 // Clamp only in normalized mode, where it pins the far field:
