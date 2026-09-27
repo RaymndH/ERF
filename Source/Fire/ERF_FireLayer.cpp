@@ -1179,7 +1179,10 @@ void FireLayer::advance(Real time, Real dt, SurfaceLayer& surface_layer,
                                       /*normalized=*/false,
                                       fire_nonburnable.get(), wall_extrap, ls_grad,
                                       m_params.levelset_reinit_skip_clamp,
-                                      m_params.levelset_reinit_tvd_rk3);
+                                      m_params.levelset_reinit_tvd_rk3,
+                                      /*disable_subcell_fix=*/false,
+                                      /*wrf_style_upwind=*/false,
+                                      m_params.levelset_reinit_exact_freeze);
                 enforce_nonburnable_phi();
                 fire_fill_boundary(*fire_phi, m_fg.geom);
             }

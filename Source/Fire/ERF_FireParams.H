@@ -145,6 +145,7 @@ struct FireParams
     amrex::Real       levelset_reinit_dtau    = -1.0;  ///< Reinitialization pseudo-dt (<0 = auto = 0.5*min(dx,dy))
     bool              levelset_reinit_skip_clamp = false; ///< Diagnostic: disable the final "fire area can only increase" min-clamp safeguard (see ERF_Reinitialize.H). Default false = current, confirmed behavior; true is an unbounded-error test variant, not for production use.
     bool              levelset_reinit_tvd_rk3 = false; ///< Use 3-stage SSP/TVD RK3 (Jiang & Peng's time integrator) instead of forward Euler for the reinit pseudo-time loop; same per-cell RHS either way. Default false = current, confirmed behavior.
+    bool              levelset_reinit_exact_freeze = false; ///< Sussman & Fatemi (1999)-style exact interface freeze: near-front cells jump directly to their phi0-derived target distance instead of relaxing toward it, an exact (not approximate) interface-preservation guarantee. Confirmed to bound the previously-unbounded curvature-driven drift in the static circle test (clamped case); NOT yet confirmed in a full dynamical run. Requires the clamp (levelset_reinit_skip_clamp=false) -- catastrophically unstable without it. Default false = current, confirmed behavior.
     std::string       levelset_gradient       = "weno5z_front"; ///< One-sided derivatives: "upwind" (first order), "weno5z" (HJ-WENO5-Z everywhere) or "weno5z_front" (WENO within weno_band_cells of the front, first order elsewhere; the WRF-Fire default)
     int               levelset_grad_scheme    = 2;     ///< levelset_gradient resolved: 0 upwind, 1 weno5z, 2 weno5z_front
     int               levelset_weno_band_cells = 4;    ///< Half-width in fire cells of the front band that uses WENO with "weno5z_front" (WRF-Fire fire_lsm_band_ngp)
@@ -913,6 +914,7 @@ struct FireParams
        pp.query("levelset.reinit_dtau", levelset_reinit_dtau);
        pp.query("levelset.reinit_skip_clamp", levelset_reinit_skip_clamp);
        pp.query("levelset.reinit_tvd_rk3", levelset_reinit_tvd_rk3);
+       pp.query("levelset.reinit_exact_freeze", levelset_reinit_exact_freeze);
        pp.query("levelset.wall_extrapolate", levelset_wall_extrapolate);
        pp.query("levelset.ellipse",        levelset_ellipse);
        pp.query("levelset.ellipse_lw",     levelset_ellipse_lw);
