@@ -207,6 +207,7 @@ if(ERF_ENABLE_FIRE)
     ${CMAKE_CURRENT_SOURCE_DIR}/Fire/ERF_GTestFuelMoistureLive.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Fire/ERF_GTestFirePrecip.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Fire/ERF_GTestLevelSetAdvection.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Fire/ERF_GTestReinitDrift.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Fire/ERF_GTestPrescribedFire.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Fire/ERF_GTestDirectionalShape.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Fire/ERF_GTestWindLimit.cpp
