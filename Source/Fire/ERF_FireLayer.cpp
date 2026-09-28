@@ -1167,22 +1167,15 @@ void FireLayer::advance(Real time, Real dt, SurfaceLayer& surface_layer,
 
             ++m_levelset_subcycle_count;
             if (m_levelset_subcycle_count % m_params.levelset_reinit_every == 0) {
-                // Sussman reinitialization is stable for dtau <= dx/2; 0.5*dx sits
-                // exactly on that limit and went unstable once enough iterations
-                // were taken, so default to half of it.
+                // WRF-Fire's own default reinit pseudo-dt (module_fr_fire_core.F):
+                // dtau = 0.01*dx. See ERF_Reinitialize.H's 2026-09-28 reset note.
                 amrex::Real dtau = (m_params.levelset_reinit_dtau > 0.0)
                     ? m_params.levelset_reinit_dtau
-                    : 0.25 * std::min(m_fg.geom.CellSize()[0], m_fg.geom.CellSize()[1]);
+                    : 0.01 * m_fg.geom.CellSize()[0];
                 fire_levelset::reinitialize_phi(*fire_phi, m_fg.geom,
                                       m_params.levelset_reinit_iters, dtau,
-                                      m_params.levelset_reinit_band_m,
-                                      /*normalized=*/false,
-                                      fire_nonburnable.get(), wall_extrap, ls_grad,
-                                      m_params.levelset_reinit_skip_clamp,
-                                      m_params.levelset_reinit_tvd_rk3,
-                                      /*disable_subcell_fix=*/false,
-                                      /*wrf_style_upwind=*/false,
-                                      m_params.levelset_reinit_exact_freeze);
+                                      ls_grad.band,
+                                      fire_nonburnable.get(), wall_extrap);
                 enforce_nonburnable_phi();
                 fire_fill_boundary(*fire_phi, m_fg.geom);
             }

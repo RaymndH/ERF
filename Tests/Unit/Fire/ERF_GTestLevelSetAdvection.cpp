@@ -320,7 +320,7 @@ TEST(LevelSetAdvection, DiscExpandsAtRos)
             advect_levelset_weno5z_rk3(phi, vel, R, f.geom, dt, 0.4, nullptr, nullptr, false, g);
             fire_fill_boundary(phi, f.geom);
             if ((step + 1) % 5 == 0) {
-                reinitialize_phi(phi, f.geom, 10, 0.25 * DX, -1.0, /*normalized=*/false, nullptr, false, g);
+                reinitialize_phi(phi, f.geom, 10, 0.25 * DX, 4.0 * DX);
                 fire_fill_boundary(phi, f.geom);
             }
             const amrex::Long n = burned_cells(phi);
@@ -358,7 +358,7 @@ TEST(LevelSetAdvection, ReinitialisationRestoresUnitGradient)
         auto band = [&f, R0] (int i, int j) { return std::abs(f.radius(i, j) - R0) < 3.0 * DX; };
         EXPECT_GT(max_abs_diff(rhs, ref, band), 0.4) << "scheme " << s;
 
-        reinitialize_phi(phi, f.geom, iters, dtau, -1.0, /*normalized=*/false, nullptr, false, g);
+        reinitialize_phi(phi, f.geom, iters, dtau, 4.0 * DX);
         fire_fill_boundary(phi, f.geom);
 
         compute_levelset_rhs(rhs, phi, R, DX, DX, 0.0, nullptr, nullptr, false, g);
