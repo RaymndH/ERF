@@ -90,6 +90,105 @@ inline void compute_levelset_rhs(amrex::MultiFab& rhs,
 }
 
 /**
+ * @brief Compute level-set RHS with the wind/slope advective term upwinded
+ * SEPARATELY from the isotropic term, instead of folding both into one
+ * scalar R(n) multiplied by a single Godunov |grad phi| (compute_levelset_rhs
+ * above).
+ *
+ * Only valid for erf.fire.directional_wind_coupling = "advective" with
+ * directional_shape = "projection" and ros_model = "rothermel", where the
+ * physical R(n)|grad phi| reduces exactly to a genuine two-term Hamiltonian:
+ *
+ *   phi_t = -R0*|grad phi| - max(Vw.grad phi, 0) - max(Vs.grad phi, 0)
+ *
+ * with Vw = R0*phi_w(|U|)/|U| * U (wind) and Vs = R0*phi_s(|slope|)/|slope| *
+ * slope (terrain), each clamped to its own max(.,0) exactly as
+ * rothermel_ros_cell's phi_w/phi_s cosine clamps do. R0 and Vw/Vs are known a
+ * priori from the wind/slope fields (independent of phi), so each advective
+ * term is upwinded by the SIGN OF ITS OWN V component-by-component -- ordinary
+ * linear-advection upwind, not a front-normal-derived rule. See
+ * ERF_DirectionalRos.H's advect_levelset_directional_rk3_split() and its
+ * DirectionalRosParams::directional_split_hamiltonian doc comment for the
+ * full rationale (this fixes a structurally different mismatch than Variant
+ * G's front-normal construction, which tested negative for the flat-terrain
+ * rotation-invariance bulge).
+ *
+ * @param[out] rhs      RHS field (modified in-place)
+ * @param[in]  phi      Level-set field with ghosts
+ * @param[in]  R0       Isotropic (no-wind, no-slope) rate of spread [m/s]
+ * @param[in]  VwVs     4-component field: (Vwx, Vwy, Vsx, Vsy) [m/s], built
+ *                      once from wind/slope (independent of phi)
+ * @param[in]  dx, dy   Cell sizes
+ * @param[in]  eps_visc Artificial viscosity coefficient
+ */
+inline void compute_levelset_rhs_split_advective(amrex::MultiFab& rhs,
+                                                  const amrex::MultiFab& phi,
+                                                  amrex::Real R0,
+                                                  const amrex::MultiFab& VwVs,
+                                                  amrex::Real dx, amrex::Real dy,
+                                                  amrex::Real eps_visc,
+                                                  const amrex::MultiFab* slopes = nullptr,
+                                                  const amrex::MultiFab* mask = nullptr,
+                                                  bool wall_extrap = false,
+                                                  const LevelSetGradient& grad_scheme = LevelSetGradient{})
+{
+    using namespace amrex;
+
+    const Real dx2i = 1.0 / (dx * dx);
+    const Real dy2i = 1.0 / (dy * dy);
+    const bool use_terrain = (slopes != nullptr);
+
+    for (MFIter mfi(rhs); mfi.isValid(); ++mfi) {
+        const Box& bx = mfi.validbox();
+        auto rhs_arr = rhs.array(mfi);
+        auto phi_arr = phi.const_array(mfi);
+        auto v_arr = VwVs.const_array(mfi);
+        const WallStencil wall = make_wall_stencil(mask, wall_extrap, mfi);
+
+        Array4<const Real> slope_arr;
+        if (use_terrain) slope_arr = slopes->const_array(mfi);
+
+        ParallelFor(bx, [=] AMREX_GPU_DEVICE (const IntVect& iv) noexcept {
+            int i = iv[0], j = iv[1], k = iv[2];
+
+            const Real sx = use_terrain ? slope_arr(i, j, k, 0) : Real(0.0);
+            const Real sy = use_terrain ? slope_arr(i, j, k, 1) : Real(0.0);
+            Real norm_grad = fire_levelset::godunov_norm_grad_phi(phi_arr, dx, dy,
+                                                                  i, j, k, sx, sy, wall,
+                                                                  grad_scheme);
+
+            Real laplacian = (wall.at(phi_arr, i, j, k, 1, 0) - 2.0*phi_arr(i, j, k)
+                              + wall.at(phi_arr, i, j, k, -1, 0)) * dx2i
+                           + (wall.at(phi_arr, i, j, k, 0, 1) - 2.0*phi_arr(i, j, k)
+                              + wall.at(phi_arr, i, j, k, 0, -1)) * dy2i;
+            const Real eps = grad_scheme.eps_at(phi_arr(i, j, k), eps_visc);
+
+            // Each advective term upwinded by the sign of its OWN velocity
+            // component, independent of the front normal -- ordinary
+            // linear-advection upwind (one_sided_derivatives returns D- in
+            // dxm/dym, D+ in dxp/dyp; for phi_t + a*phi_x = 0 with a > 0 the
+            // correct upwind derivative is the backward/left-biased one, D-).
+            Real dxm, dxp, dym, dyp;
+            fire_levelset::one_sided_derivatives(phi_arr, dx, i, j, k, 1, 0, grad_scheme, wall, dxm, dxp);
+            fire_levelset::one_sided_derivatives(phi_arr, dy, i, j, k, 0, 1, grad_scheme, wall, dym, dyp);
+
+            const Real Vwx = v_arr(i, j, k, 0), Vwy = v_arr(i, j, k, 1);
+            const Real Vsx = v_arr(i, j, k, 2), Vsy = v_arr(i, j, k, 3);
+
+            const Real phix_w = (Vwx > Real(0.0)) ? dxm : dxp;
+            const Real phiy_w = (Vwy > Real(0.0)) ? dym : dyp;
+            const Real adv_w = amrex::max(Vwx*phix_w + Vwy*phiy_w, Real(0.0));
+
+            const Real phix_s = (Vsx > Real(0.0)) ? dxm : dxp;
+            const Real phiy_s = (Vsy > Real(0.0)) ? dym : dyp;
+            const Real adv_s = amrex::max(Vsx*phix_s + Vsy*phiy_s, Real(0.0));
+
+            rhs_arr(i, j, k) = -R0*(norm_grad - eps*laplacian) - adv_w - adv_s;
+        });
+    }
+}
+
+/**
  * @brief Zero a rate-of-spread field where a non-burnable mask is set
  *
  * @param[in,out] R     Rate of spread [m/s]

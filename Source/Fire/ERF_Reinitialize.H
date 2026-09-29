@@ -80,6 +80,23 @@
  * worktree's git history (branch `fire-reinit-drift-investigation`) and in
  * WRF_ERF/CLAUDE.md's dated addenda, not carried forward as production
  * surface area.
+ *
+ * ADDED 2026-09-28: even after this reset, dynamical testing found the WRF
+ * scheme above has its own real, systematic (non-cancelling) directional
+ * bias -- traced to two structural mismatches: (1) `select_weno5`
+ * reconstructs phi VALUES in flux form, machinery built for a conserved
+ * density's cell averages, not for a Hamilton-Jacobi variable's one-sided
+ * derivatives (the "HJ form" WRF's own advection path, and ERF's, already
+ * use correctly); (2) Wicker-Skamarock RK3 is only 2nd-order accurate for
+ * this nonlinear RHS, not the 3rd order true SSP-RK3 gives. `reinitialize_
+ * phi_jiang_peng()` below is Jiang & Peng's (2000) own HJ-WENO5 + SSP-RK3
+ * scheme (TASKS_levelset.md Appendix B / task T6), fixing both of those
+ * -- selected via `erf.fire.levelset.reinit_scheme = "jiang_peng"` (default
+ * remains "wrf"). It does NOT fix dimensional splitting itself (both
+ * schemes still build the gradient from independent x/y one-sided
+ * derivatives, as does essentially every grid-based Eikonal solver), so it
+ * is not expected to remove the oblique-front bias on its own -- see
+ * WRF_ERF/CLAUDE.md for the dynamical test results.
  */
 
 namespace fire_levelset {
@@ -199,6 +216,208 @@ amrex::Real reinit_rhs_cell(amrex::Array4<amrex::Real const> const& lfn_curr,
 }
 
 } // namespace wrf_reinit
+
+namespace jiang_peng {
+
+/**
+ * @brief Godunov |grad phi| for the reinit Hamiltonian
+ *        phi_tau + S*(|grad phi| - 1) = 0, Jiang & Peng (2000) eq. (3.12).
+ *
+ * (a)+ = max(a,0), (a)- = -min(a,0). For S>=0 (expanding, phi0>0 side):
+ * |grad phi| = sqrt( max((D-x)+,(D+x)-)^2 + max((D-y)+,(D+y)-)^2 ), and the
+ * mirror image for S<0. This is the same Osher-Sethian upwind selection
+ * ERF's own godunov_norm_grad_phi (ERF_NumericalSchemes.H) uses for the
+ * ADVECTION equation's |grad phi|>=0 Hamiltonian; here it is applied to the
+ * reinit Hamiltonian instead, whose sign of propagation is S(phi0), not a
+ * fixed-sign rate of spread.
+ */
+AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+amrex::Real godunov_norm(amrex::Real s, amrex::Real dxm, amrex::Real dxp,
+                          amrex::Real dym, amrex::Real dyp) noexcept
+{
+    using namespace amrex;
+    Real gx, gy;
+    if (s >= 0.0_rt) {
+        gx = amrex::max(-amrex::min(dxp, 0.0_rt), amrex::max(dxm, 0.0_rt));
+        gy = amrex::max(-amrex::min(dyp, 0.0_rt), amrex::max(dym, 0.0_rt));
+    } else {
+        gx = amrex::max(amrex::max(dxp, 0.0_rt), -amrex::min(dxm, 0.0_rt));
+        gy = amrex::max(amrex::max(dyp, 0.0_rt), -amrex::min(dym, 0.0_rt));
+    }
+    return std::sqrt(gx*gx + gy*gy);
+}
+
+/**
+ * @brief Per-cell RHS L(phi) = -S(phi0)*(|grad phi|_Godunov - 1), Jiang &
+ * Peng's reinit scheme.
+ *
+ * Two structural differences from wrf_reinit::reinit_rhs_cell above: (1)
+ * the one-sided derivatives come from ERF's existing HJ-WENO5-Z
+ * (one_sided_derivatives/hj_weno5z, the same machinery the ADVECTION path
+ * already uses) on DIVIDED DIFFERENCES of phi, not a flux-form WENO5 on
+ * phi VALUES -- the "HJ form", appropriate for a Hamilton-Jacobi variable
+ * that is not a conserved density; (2) the upwind side is picked by the
+ * Godunov/Osher-Sethian rule (sign of S, i.e. of phi0) rather than by a
+ * 4th-order-central-difference-based rule. delta ~ dx is the smoothed-sign
+ * width (same role as WRF's fixed dx, not scaled by any band). No hybrid
+ * WENO5/ENO1 split by band -- HJ-WENO5-Z is used everywhere, matching
+ * TASKS_levelset.md Appendix B (T6).
+ */
+AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+amrex::Real reinit_rhs_cell(amrex::Array4<amrex::Real const> const& phi_state,
+                             amrex::Array4<amrex::Real const> const& phi_in,
+                             const WallStencil& wall,
+                             int i, int j, int k,
+                             amrex::Real dx0, amrex::Real dx1,
+                             amrex::Real delta,
+                             const LevelSetGradient& grad) noexcept
+{
+    using namespace amrex;
+    Real dxm, dxp, dym, dyp;
+    one_sided_derivatives(phi_state, dx0, i, j, k, 1, 0, grad, wall, dxm, dxp);
+    one_sided_derivatives(phi_state, dx1, i, j, k, 0, 1, grad, wall, dym, dyp);
+
+    const Real p0 = phi_in(i, j, k);
+    const Real s = p0 / std::sqrt(p0*p0 + delta*delta);
+    const Real g = godunov_norm(s, dxm, dxp, dym, dyp);
+    return -s * (g - 1.0_rt);
+}
+
+} // namespace jiang_peng
+
+/**
+ * @brief Reinitialize phi via Jiang & Peng's (2000) HJ-WENO5 scheme
+ * (SIAM J. Sci. Comput. 21, Example 6, eqs. 3.10-3.12), as an alternative
+ * to WRF's ported algorithm above -- see TASKS_levelset.md Appendix B/T6
+ * and the file comment's cross-reference in reinitialize_phi() below for
+ * why this exists: it fixes the flux-form/HJ-form mismatch (WRF's
+ * select_weno5 reconstructs phi VALUES like a conserved quantity; phi is
+ * not one) and the Wicker-Skamarock-vs-true-SSP-RK3 mismatch (WS-RK3 is
+ * only 2nd-order accurate for this nonlinear RHS), while still using
+ * dimensionally-split (independent x/y) one-sided derivatives like every
+ * grid-based Eikonal solver here -- so it is NOT expected to remove the
+ * splitting-driven directional bias on its own, only the other two.
+ *
+ * True 3-stage Shu-Osher SSP-RK3 (every stage additive from the previous
+ * one, not from a fixed base -- unlike Wicker-Skamarock):
+ *   phi1 = phi0 + dtau*L(phi0)
+ *   phi2 = 3/4 phi0 + 1/4*(phi1 + dtau*L(phi1))
+ *   phi3 = 1/3 phi0 + 2/3*(phi2 + dtau*L(phi2))
+ *
+ * No subcell fix, no per-iteration clamp (matching JP's own scheme, which
+ * has neither) -- but the SAME final min(phi_out, phi_in) safeguard as
+ * reinitialize_phi() is applied here too, since production needs "fire
+ * area can only increase" regardless of which internal scheme produced
+ * the update; JP's own reference (T6's conditional task) has no clamp at
+ * all, this is a production-integration difference, not part of JP's
+ * scheme itself.
+ *
+ * @param[in,out] phi        Level-set field [m], modified in place.
+ * @param[in]     geom       Domain geometry.
+ * @param[in]     n_iters    Number of SSP-RK3 pseudo-time steps.
+ * @param[in]     dtau       Pseudo-timestep [m]. JP's stability limit is
+ *                           dtau <= 0.6*dx (CFL from |dH/dp|<=1); pass a
+ *                           value at or below that.
+ * @param[in]     mask       Optional non-burnable mask, read only with
+ *                           wall_extrap.
+ * @param[in]     wall_extrap  Leave mask cells untouched and read
+ *                           neighbours through a wall stencil.
+ */
+inline void reinitialize_phi_jiang_peng(amrex::MultiFab& phi,
+                                         const amrex::Geometry& geom,
+                                         int n_iters,
+                                         amrex::Real dtau,
+                                         const amrex::MultiFab* mask = nullptr,
+                                         bool wall_extrap = false,
+                                         amrex::Real sign_eps2_override = -1.0)
+{
+    using namespace amrex;
+    const auto* dx = geom.CellSize();
+    // Jiang & Peng (1997 CAM 97-29 / 2000 SIAM), Example 6: s = phi0/sqrt(phi0^2+delta)
+    // with "delta comparable to the spatial step size" -- their delta is the term
+    // ADDED to phi0^2 (area-scale, so delta~dx^2 is the only dimensionally consistent
+    // reading; that is our default below). sign_eps2_override lets a caller instead
+    // test the literal-linear reading delta=dx (i.e. pass dx here, not dx^2), to
+    // measure sensitivity to which reading is meant.
+    const Real sign_eps2 = (sign_eps2_override > 0.0_rt) ? sign_eps2_override : dx[0]*dx[0];
+    const Real delta = std::sqrt(sign_eps2);
+    const LevelSetGradient grad{LEVELSET_GRAD_WENO5Z, -1.0, -1.0, 0.0, 0.0};
+
+    MultiFab phi_in(phi.boxArray(), phi.DistributionMap(), 1, 3);
+    phi_in.ParallelCopy(phi);
+
+    MultiFab phi_work(phi.boxArray(), phi.DistributionMap(), 1, 3);
+    phi_work.ParallelCopy(phi);
+    MultiFab stage1(phi.boxArray(), phi.DistributionMap(), 1, 3);
+    MultiFab stage2(phi.boxArray(), phi.DistributionMap(), 1, 3);
+
+    for (int iter = 0; iter < n_iters; ++iter) {
+        fire_fill_boundary(phi_work, geom);
+
+        // Stage 1: phi1 = phi0 + dtau*L(phi0) -> stage1. S(phi_in) uses the
+        // field fixed at CALL ENTRY, not phi0/phi_work (which is only fixed
+        // per outer iteration) -- matching "S computed ONCE... before the
+        // loop" (Appendix B) / WRF's own "held fixed across every outer
+        // iteration and RK stage" convention.
+        for (MFIter mfi(phi_work); mfi.isValid(); ++mfi) {
+            const Box& bx = mfi.validbox();
+            auto p0 = phi_work.const_array(mfi);
+            auto pin = phi_in.const_array(mfi);
+            auto out = stage1.array(mfi);
+            const WallStencil wall = make_wall_stencil(mask, wall_extrap, mfi);
+            ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+                if (wall.masked(i, j, k)) { out(i, j, k) = p0(i, j, k); return; }
+                const Real L = jiang_peng::reinit_rhs_cell(p0, pin, wall, i, j, k, dx[0], dx[1], delta, grad);
+                out(i, j, k) = p0(i, j, k) + dtau * L;
+            });
+        }
+        fire_fill_boundary(stage1, geom);
+
+        // Stage 2: phi2 = 3/4 phi0 + 1/4*(phi1 + dtau*L(phi1)) -> stage2
+        for (MFIter mfi(phi_work); mfi.isValid(); ++mfi) {
+            const Box& bx = mfi.validbox();
+            auto p0 = phi_work.const_array(mfi);
+            auto p1 = stage1.const_array(mfi);
+            auto pin = phi_in.const_array(mfi);
+            auto out = stage2.array(mfi);
+            const WallStencil wall = make_wall_stencil(mask, wall_extrap, mfi);
+            ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+                if (wall.masked(i, j, k)) { out(i, j, k) = p0(i, j, k); return; }
+                const Real L = jiang_peng::reinit_rhs_cell(p1, pin, wall, i, j, k, dx[0], dx[1], delta, grad);
+                out(i, j, k) = 0.75_rt * p0(i, j, k) + 0.25_rt * (p1(i, j, k) + dtau * L);
+            });
+        }
+        fire_fill_boundary(stage2, geom);
+
+        // Stage 3: phi3 = 1/3 phi0 + 2/3*(phi2 + dtau*L(phi2)) -> back into phi_work
+        for (MFIter mfi(phi_work); mfi.isValid(); ++mfi) {
+            const Box& bx = mfi.validbox();
+            auto p0 = phi_work.const_array(mfi);
+            auto p2 = stage2.const_array(mfi);
+            auto pin = phi_in.const_array(mfi);
+            auto out = stage1.array(mfi); // stage1's contents no longer needed
+            const WallStencil wall = make_wall_stencil(mask, wall_extrap, mfi);
+            ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+                if (wall.masked(i, j, k)) { out(i, j, k) = p0(i, j, k); return; }
+                const Real L = jiang_peng::reinit_rhs_cell(p2, pin, wall, i, j, k, dx[0], dx[1], delta, grad);
+                out(i, j, k) = (1.0_rt/3.0_rt) * p0(i, j, k) + (2.0_rt/3.0_rt) * (p2(i, j, k) + dtau * L);
+            });
+        }
+        MultiFab::Copy(phi_work, stage1, 0, 0, 1, 0);
+    }
+
+    // Same final safeguard as reinitialize_phi() -- see its comment.
+    for (MFIter mfi(phi_work); mfi.isValid(); ++mfi) {
+        const Box& bx = mfi.validbox();
+        auto out = phi_work.array(mfi);
+        auto pin = phi_in.const_array(mfi);
+        ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+            out(i, j, k) = amrex::min(out(i, j, k), pin(i, j, k));
+        });
+    }
+
+    phi.ParallelCopy(phi_work);
+}
 
 /**
  * @brief Reinitialize phi via WRF-Fire's reinit_ls_rk3 algorithm (metric

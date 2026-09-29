@@ -1137,15 +1137,24 @@ void FireLayer::advance(Real time, Real dt, SurfaceLayer& surface_layer,
                 // FBP reads the reference-height wind unless told otherwise;
                 // every other model takes the midflame wind.
                 const bool fbp_ref = (m_params.ros_model == "fbp") && (m_params.fbp.wind_source == 0);
-                advect_levelset_directional_rk3(*fire_phi, fbp_ref ? *fire_wind_ref : *fire_wind_eff,
-                                                *fire_slopes, m_fg.geom, dt_ls,
-                                                m_params.levelset_eps_visc,
-                                                dir_state, fire_nonburnable.get(), wall_extrap,
-                                                ls_grad, m_params.directional_shape,
-                                                m_params.directional_ellipse_lw,
-                                                m_params.directional_ellipse_lw_max,
-                                                accel_factor.get(),
-                                                m_params.directional_wind_coupling);
+                if (m_params.directional_split_hamiltonian) {
+                    advect_levelset_directional_rk3_split(*fire_phi,
+                                                    fbp_ref ? *fire_wind_ref : *fire_wind_eff,
+                                                    *fire_slopes, m_fg.geom, dt_ls,
+                                                    m_params.levelset_eps_visc,
+                                                    dir_state, fire_nonburnable.get(), wall_extrap,
+                                                    ls_grad);
+                } else {
+                    advect_levelset_directional_rk3(*fire_phi, fbp_ref ? *fire_wind_ref : *fire_wind_eff,
+                                                    *fire_slopes, m_fg.geom, dt_ls,
+                                                    m_params.levelset_eps_visc,
+                                                    dir_state, fire_nonburnable.get(), wall_extrap,
+                                                    ls_grad, m_params.directional_shape,
+                                                    m_params.directional_ellipse_lw,
+                                                    m_params.directional_ellipse_lw_max,
+                                                    accel_factor.get(),
+                                                    m_params.directional_wind_coupling);
+                }
             } else if (m_params.levelset_ellipse) {
                 // Huygens ellipse: the model's rate is the head rate and the
                 // normal speed follows the ellipse set by the midflame wind.
@@ -1167,15 +1176,32 @@ void FireLayer::advance(Real time, Real dt, SurfaceLayer& surface_layer,
 
             ++m_levelset_subcycle_count;
             if (m_levelset_subcycle_count % m_params.levelset_reinit_every == 0) {
-                // WRF-Fire's own default reinit pseudo-dt (module_fr_fire_core.F):
-                // dtau = 0.01*dx. See ERF_Reinitialize.H's 2026-09-28 reset note.
+                const bool use_jp = (m_params.levelset_reinit_scheme == "jiang_peng");
+                // Auto default: 0.01*dx for BOTH schemes, matching WRF-Fire's
+                // own value (module_fr_fire_core.F), so a scheme-vs-scheme
+                // comparison isn't confounded by also comparing two different
+                // reinit aggressiveness levels. (An earlier version of this
+                // defaulted "jiang_peng" to 0.5*dx, reasoning from JP's own
+                // dtau<=0.6*dx stability limit -- that produced a real but
+                // spurious "JP blunts corners more than WRF" finding that
+                // turned out to be purely the 50x larger dtau, not a scheme
+                // difference; see CLAUDE.md's 2026-09-28 correction. JP's
+                // stability limit is far above this default, so 0.01*dx is
+                // still comfortably valid for it.)
                 amrex::Real dtau = (m_params.levelset_reinit_dtau > 0.0)
                     ? m_params.levelset_reinit_dtau
                     : 0.01 * m_fg.geom.CellSize()[0];
-                fire_levelset::reinitialize_phi(*fire_phi, m_fg.geom,
-                                      m_params.levelset_reinit_iters, dtau,
-                                      ls_grad.band,
-                                      fire_nonburnable.get(), wall_extrap);
+                if (use_jp) {
+                    fire_levelset::reinitialize_phi_jiang_peng(*fire_phi, m_fg.geom,
+                                          m_params.levelset_reinit_iters, dtau,
+                                          fire_nonburnable.get(), wall_extrap,
+                                          m_params.levelset_reinit_jp_sign_eps2);
+                } else {
+                    fire_levelset::reinitialize_phi(*fire_phi, m_fg.geom,
+                                          m_params.levelset_reinit_iters, dtau,
+                                          ls_grad.band,
+                                          fire_nonburnable.get(), wall_extrap);
+                }
                 enforce_nonburnable_phi();
                 fire_fill_boundary(*fire_phi, m_fg.geom);
             }

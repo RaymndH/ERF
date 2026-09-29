@@ -141,7 +141,9 @@ struct FireParams
     amrex::Real       levelset_eps_visc       = 0.4;   ///< Artificial viscosity coefficient ε
     int               levelset_reinit_every   = 5;     ///< Reinitialize φ every N fire subcycles
     int               levelset_reinit_iters   = 1;     ///< Outer RK3 pseudo-time steps (WRF's fire_lsm_reinit_iter; WRF's own comment: "1 iter each time step is enough")
-    amrex::Real       levelset_reinit_dtau    = -1.0;  ///< Reinitialization pseudo-dt [m] (<=0 = auto = WRF's own default, 0.01*dx)
+    amrex::Real       levelset_reinit_dtau    = -1.0;  ///< Reinitialization pseudo-dt [m] (<=0 = auto: 0.01*dx for "wrf", 0.5*dx for "jiang_peng")
+    std::string       levelset_reinit_scheme  = "wrf"; ///< "wrf" (default, WRF-Fire's reinit_ls_rk3 port) or "jiang_peng" (Jiang & Peng 2000 HJ-WENO5 + true SSP-RK3, see ERF_Reinitialize.H); test/comparison option, added 2026-09-28
+    amrex::Real       levelset_reinit_jp_sign_eps2 = -1.0; ///< jiang_peng only: term added to phi0^2 under the smoothed-sign sqrt (<=0 = auto dx^2, JP's "delta comparable to spatial step size" read as an area scale). Set to dx (not dx^2) to test the literal-linear reading instead.
     std::string       levelset_gradient       = "weno5z_front"; ///< One-sided derivatives: "upwind" (first order), "weno5z" (HJ-WENO5-Z everywhere) or "weno5z_front" (WENO within weno_band_cells of the front, first order elsewhere; the WRF-Fire default)
     int               levelset_grad_scheme    = 2;     ///< levelset_gradient resolved: 0 upwind, 1 weno5z, 2 weno5z_front
     int               levelset_weno_band_cells = 4;    ///< Half-width in fire cells of the front band that uses WENO with "weno5z_front" (WRF-Fire fire_lsm_band_ngp), and (since the 2026-09-28 reinit reset) also the WENO5-vs-ENO1 band threshold for reinitialize_phi -- ERF_FireLayer.cpp scales this same value by dx for both call sites
@@ -424,6 +426,27 @@ struct FireParams
     // already convex and every other model or the hybrid path would silently
     // ignore this flag.
     int               directional_wind_coupling = 0;
+
+    // erf.fire.directional_split_hamiltonian (opt-in, default false; needs
+    // directional_wind_coupling = "advective" and directional_shape =
+    // "projection" and ros_model = "rothermel" -- the only combination where
+    // R(n)|grad phi| reduces to R0|grad phi| + max(V.grad phi,0), a genuine
+    // two-term Hamiltonian). When false (default), R(n) is built from a
+    // front normal (fill_directional_ros) and multiplied by a separately
+    // Godunov-upwinded |grad phi| -- correct for the isotropic R0 term but
+    // not a valid upwind treatment of the wind-driven max(V.grad phi,0)
+    // term, whose own characteristic direction is V, not grad phi's normal.
+    // When true, the two terms are upwinded separately and correctly: R0's
+    // isotropic Godunov flux as before, plus the advective term upwound by
+    // the SIGN OF V component-by-component (ordinary linear-advection
+    // upwind, since V is known a priori from the wind field, not derived
+    // from phi's own gradient) -- see ERF_DirectionalRos.H's
+    // advect_levelset_directional_rk3_split(). Test/comparison option added
+    // 2026-09-28 to check whether this Hamiltonian-splitting mismatch
+    // explains the flat-terrain rotation-invariance bulge (Variant G, which
+    // only changed the front-normal construction, tested negative for this
+    // -- this is a structurally different, more invasive fix).
+    bool              directional_split_hamiltonian = false;
 
     // Flank rule of that ellipse, erf.fire.directional_ellipse_lw. "model" (0,
     // default) keeps the model's no-wind, no-slope rate at the flanks, so the
@@ -907,6 +930,9 @@ struct FireParams
        pp.query("levelset.reinit_every", levelset_reinit_every);
        pp.query("levelset.reinit_iters", levelset_reinit_iters);
        pp.query("levelset.reinit_dtau", levelset_reinit_dtau);
+       pp.query("levelset.reinit_scheme", levelset_reinit_scheme);
+       one_of("levelset.reinit_scheme", levelset_reinit_scheme, {"wrf", "jiang_peng"});
+       pp.query("levelset.reinit_jp_sign_eps2", levelset_reinit_jp_sign_eps2);
        pp.query("levelset.wall_extrapolate", levelset_wall_extrapolate);
        pp.query("levelset.ellipse",        levelset_ellipse);
        pp.query("levelset.ellipse_lw",     levelset_ellipse_lw);
@@ -1110,6 +1136,7 @@ struct FireParams
            } else {
                amrex::Abort("erf.fire.directional_wind_coupling must be \"projection\" or \"advective\"");
            }
+           pp.query("directional_split_hamiltonian", directional_split_hamiltonian);
 
            std::string lw_str = (directional_ellipse_lw == 1) ? "anderson" : "model";
            pp.query("directional_ellipse_lw", lw_str);
@@ -1578,6 +1605,8 @@ struct FireParams
            if (is_hybrid() || !uses_model("rothermel")) {
                amrex::Abort("erf.fire.directional_wind_coupling = \"advective\" is implemented for erf.fire.ros_model = \"rothermel\" only, not hybrid or another model");
            }
+       } else if (directional_split_hamiltonian) {
+           amrex::Abort("erf.fire.directional_split_hamiltonian needs erf.fire.directional_wind_coupling = \"advective\"");
        }
     }
 

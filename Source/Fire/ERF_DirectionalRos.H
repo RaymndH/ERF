@@ -482,6 +482,126 @@ inline void fill_directional_ros(amrex::MultiFab& R_mf,
 }
 
 /**
+ * @brief Fill the (Vwx,Vwy,Vsx,Vsy) advective-velocity field used by the
+ * split-Hamiltonian advection path -- see
+ * compute_levelset_rhs_split_advective's doc comment (ERF_LevelSetAdvection.H)
+ * and advect_levelset_directional_rk3_split() below.
+ *
+ * Mirrors rothermel_ros_cell's own phi_w/phi_s formula exactly (same C, B,
+ * beta_ratio_E, wind_conv, U_max_ftmin, phi_s_const), but stops short of
+ * applying the direction cosine -- that is what the split RHS's per-axis
+ * upwind selection does instead of a cosine multiply. Independent of phi,
+ * so it only needs to be built once per advection call, not per RK stage.
+ * Rothermel only (matches directional_wind_coupling = "advective"'s own
+ * restriction).
+ */
+inline void fill_advective_VwVs(amrex::MultiFab& VwVs,
+                                const amrex::MultiFab& wind,
+                                const amrex::MultiFab& slopes,
+                                const DirectionalRosState& st)
+{
+    const amrex::Real R0 = st.rc.R0;
+    const amrex::Real C = st.rc.C, B = st.rc.B, beta_ratio_E = st.rc.beta_ratio_E;
+    const amrex::Real wind_conv = st.rc.wind_conv, Umax = st.rc.U_max_ftmin;
+    const amrex::Real phi_s_const = st.rc.phi_s_const;
+
+    for (amrex::MFIter mfi(VwVs); mfi.isValid(); ++mfi) {
+        const amrex::Box& bx = mfi.validbox();
+        auto v_arr = VwVs.array(mfi);
+        auto wind_arr = wind.const_array(mfi);
+        auto slopes_arr = slopes.const_array(mfi);
+
+        amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE (const amrex::IntVect& iv) {
+            const int i = iv[0], j = iv[1], k = iv[2];
+            const amrex::Real u = wind_arr(i, j, k, 0);
+            const amrex::Real v = wind_arr(i, j, k, 1);
+            const amrex::Real dzdx = slopes_arr(i, j, k, 0);
+            const amrex::Real dzdy = slopes_arr(i, j, k, 1);
+
+            const amrex::Real U_mag = std::sqrt(u*u + v*v);
+            const amrex::Real s_mag = std::sqrt(dzdx*dzdx + dzdy*dzdy);
+
+            const amrex::Real U_ftmin = amrex::min(U_mag * wind_conv, Umax);
+            const amrex::Real phi_w = C * std::pow(U_ftmin, B) * beta_ratio_E;
+            const amrex::Real tan_slope_sq = amrex::min(dzdx*dzdx + dzdy*dzdy, amrex::Real(32.0));
+            const amrex::Real phi_s = phi_s_const * tan_slope_sq;
+
+            amrex::Real Vwx = 0.0, Vwy = 0.0, Vsx = 0.0, Vsy = 0.0;
+            if (U_mag > amrex::Real(1.0e-12)) { Vwx = R0*phi_w*u/U_mag; Vwy = R0*phi_w*v/U_mag; }
+            if (s_mag > amrex::Real(1.0e-12)) { Vsx = R0*phi_s*dzdx/s_mag; Vsy = R0*phi_s*dzdy/s_mag; }
+
+            v_arr(i, j, k, 0) = Vwx;
+            v_arr(i, j, k, 1) = Vwy;
+            v_arr(i, j, k, 2) = Vsx;
+            v_arr(i, j, k, 3) = Vsy;
+        });
+    }
+}
+
+/**
+ * @brief Advect the level set with Rothermel's advective wind coupling,
+ * upwinding the isotropic and wind/slope-advective terms of the Hamiltonian
+ * SEPARATELY instead of folding them into one scalar R(n) (see
+ * erf.fire.directional_split_hamiltonian's doc comment in ERF_FireParams.H
+ * and compute_levelset_rhs_split_advective's in ERF_LevelSetAdvection.H).
+ *
+ * V (Vw/Vs) depends only on wind/slope, not on phi, so it is built once
+ * before the RK3 stages rather than refilled every stage the way
+ * fill_directional_ros's R(n) is (R(n) depends on the front normal, which
+ * changes every stage; V does not).
+ *
+ * Rothermel + directional_shape = "projection" only -- the only combination
+ * where the physical R(n)|grad phi| is exactly this two-term Hamiltonian.
+ */
+inline void advect_levelset_directional_rk3_split(amrex::MultiFab& phi,
+                                                   const amrex::MultiFab& wind,
+                                                   const amrex::MultiFab& slopes,
+                                                   const amrex::Geometry& geom,
+                                                   amrex::Real dt,
+                                                   amrex::Real eps_visc,
+                                                   const DirectionalRosState& st,
+                                                   const amrex::MultiFab* nonburnable = nullptr,
+                                                   bool wall_extrap = false,
+                                                   const fire_levelset::LevelSetGradient& grad_scheme = fire_levelset::LevelSetGradient{})
+{
+    using namespace amrex;
+
+    MultiFab VwVs(phi.boxArray(), phi.DistributionMap(), 4, 0);
+    fill_advective_VwVs(VwVs, wind, slopes, st);
+    const Real R0 = st.rc.R0;
+
+    const auto* dx = geom.CellSize();
+    const int nghost = 3;
+    MultiFab phi_n(phi.boxArray(), phi.DistributionMap(), 1, nghost);
+    MultiFab phi_star(phi.boxArray(), phi.DistributionMap(), 1, nghost);
+    MultiFab phi_hat(phi.boxArray(), phi.DistributionMap(), 1, nghost);
+    MultiFab rhs(phi.boxArray(), phi.DistributionMap(), 1, 0);
+
+    phi_n.ParallelCopy(phi);
+    fire_fill_boundary(phi_n, geom);
+
+    // Stage 1
+    phi_star.ParallelCopy(phi_n);
+    fire_fill_boundary(phi_star, geom);
+    fire_levelset::compute_levelset_rhs_split_advective(rhs, phi_star, R0, VwVs, dx[0], dx[1],
+        eps_visc, &slopes, nonburnable, wall_extrap, grad_scheme);
+    fire_levelset::rk3_stage1_update(phi_star, rhs, dt);
+    fire_fill_boundary(phi_star, geom);
+
+    // Stage 2
+    fire_levelset::compute_levelset_rhs_split_advective(rhs, phi_star, R0, VwVs, dx[0], dx[1],
+        eps_visc, &slopes, nonburnable, wall_extrap, grad_scheme);
+    phi_hat.ParallelCopy(phi_n);
+    fire_levelset::rk3_stage2_update(phi_hat, phi_star, rhs, dt);
+    fire_fill_boundary(phi_hat, geom);
+
+    // Stage 3
+    fire_levelset::compute_levelset_rhs_split_advective(rhs, phi_hat, R0, VwVs, dx[0], dx[1],
+        eps_visc, &slopes, nonburnable, wall_extrap, grad_scheme);
+    fire_levelset::rk3_stage3_update(phi, phi_hat, phi_n, rhs, dt);
+}
+
+/**
  * @brief Advect the level set with a direction-dependent ROS
  *
  * Same Godunov / SSP-RK3 scheme as advect_levelset_weno5z_rk3(), except that
