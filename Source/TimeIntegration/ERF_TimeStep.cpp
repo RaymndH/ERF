@@ -72,7 +72,9 @@ ERF::timeStep (int lev, double time, int /*iteration*/)
                 //amrex::Print() << "CLEAR BDY DATA AT TIME " << itime << std::endl;
             }
 
-            bool need_itime = (itime >= n_time_old && itime <= n_time_new+1);
+            // One slice of margin: fill_from_realbdy floors a slightly different time (the fast-substep time) than
+            // n_time_new above, so at an exact record boundary it can ask for slice n_time_new+2 (segfault otherwise).
+            bool need_itime = (itime >= n_time_old && itime <= n_time_new+2);
             //if (need_itime) { amrex::Print()  << "NEED  BDY DATA AT TIME " << itime << std::endl; }
 
             // Handle erfbdy files (AMReX native format).
